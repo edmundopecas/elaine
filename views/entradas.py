@@ -241,7 +241,7 @@ resumo = query(
     f"""SELECT COALESCE(p.nome, '{NAO_DEF}') AS "Categoria", COUNT(*) AS "Qtd",
         SUM(l.valor) AS "Total"
         FROM lancamentos l LEFT JOIN plano_contas p ON p.id=l.plano_conta_id
-        WHERE {where} GROUP BY l.plano_conta_id ORDER BY "Total" DESC""",
+        WHERE {where} GROUP BY p.id, p.nome ORDER BY "Total" DESC""",
     tuple(params),
 )
 res_df = pd.DataFrame(resumo)

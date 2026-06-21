@@ -165,3 +165,38 @@ else:
         if not query("SELECT 1 FROM plano_contas LIMIT 1"):
             from seed import rodar_seed
             rodar_seed()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cache de leitura (Streamlit) — performance
+# ─────────────────────────────────────────────────────────────────────────────
+# Cada interação re-roda o script inteiro e re-consulta o banco remoto
+# (Supabase, sa-east-1): são as idas-e-voltas de rede que geram o lag. Aqui
+# cacheamos TODA leitura (query) e LIMPAMOS o cache em QUALQUER escrita
+# (execute/executemany) — então navegar/filtrar fica instantâneo, mas depois de
+# classificar/importar os dados aparecem frescos na hora. Sem Streamlit (CLIs),
+# fica tudo igual ao original.
+try:
+    import streamlit as _st
+    _HAS_ST = True
+except Exception:
+    _HAS_ST = False
+
+if _HAS_ST:
+    _raw_query = query
+    _raw_execute = execute
+    _raw_executemany = executemany
+
+    @_st.cache_data(ttl=600, show_spinner=False)
+    def query(sql: str, params: tuple = ()) -> list[dict[str, Any]]:  # type: ignore[no-redef]
+        return _raw_query(sql, params)
+
+    def execute(sql: str, params: tuple = ()) -> int:  # type: ignore[no-redef]
+        r = _raw_execute(sql, params)
+        _st.cache_data.clear()
+        return r
+
+    def executemany(sql: str, seq: list[tuple]) -> int:  # type: ignore[no-redef]
+        r = _raw_executemany(sql, seq)
+        _st.cache_data.clear()
+        return r

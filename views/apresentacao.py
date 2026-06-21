@@ -52,7 +52,7 @@ rows = query(
     f"""SELECT COALESCE(p.nome,'A classificar') AS cat, p.entra_dre AS dre,
         COUNT(*) AS qtd, SUM(l.valor) AS total
         FROM lancamentos l LEFT JOIN plano_contas p ON p.id=l.plano_conta_id
-        WHERE {where} GROUP BY l.plano_conta_id ORDER BY total DESC""",
+        WHERE {where} GROUP BY p.id, p.nome, p.entra_dre ORDER BY total DESC""",
     tuple(params),
 )
 if not rows:

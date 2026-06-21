@@ -1,0 +1,20 @@
+# Banco local e backups — NUNCA vão pro GitHub
+elaine.db
+elaine.backup-*.db
+*.db
+
+# Segredos (credenciais Supabase, senhas de login)
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# PDFs gerados / saídas locais
+*.pdf
+~$*.xlsx
+
+# Logs
+*.log

@@ -131,10 +131,10 @@ st.divider()
 
 # ── Planilha de entradas (editável) ───────────────────────────────────────────
 entradas = query(
-    f"""SELECT l.id, l.data AS Data, e.apelido AS Empresa,
-        COALESCE(cb.descricao, cb.banco, '—') AS Conta,
-        COALESCE(l.contraparte, l.descricao, '(sem descrição)') AS Descrição,
-        l.valor AS Valor, COALESCE(p.nome, '{NAO_DEF}') AS Categoria
+    f"""SELECT l.id, l.data AS "Data", e.apelido AS "Empresa",
+        COALESCE(cb.descricao, cb.banco, '—') AS "Conta",
+        COALESCE(l.contraparte, l.descricao, '(sem descrição)') AS "Descrição",
+        l.valor AS "Valor", COALESCE(p.nome, '{NAO_DEF}') AS "Categoria"
         FROM lancamentos l
         LEFT JOIN empresas e ON e.id=l.empresa_id
         LEFT JOIN contas_bancarias cb ON cb.id=l.conta_bancaria_id
@@ -224,10 +224,10 @@ if mudancas:
 st.divider()
 st.subheader("📦 Total por grupo")
 grupos = query(
-    f"""SELECT COALESCE(p.grupo, '(sem grupo)') AS Grupo, COUNT(*) AS Qtd,
-        SUM(l.valor) AS Total
+    f"""SELECT COALESCE(p.grupo, '(sem grupo)') AS "Grupo", COUNT(*) AS "Qtd",
+        SUM(l.valor) AS "Total"
         FROM lancamentos l LEFT JOIN plano_contas p ON p.id=l.plano_conta_id
-        WHERE {where} GROUP BY p.grupo ORDER BY Total DESC""",
+        WHERE {where} GROUP BY p.grupo ORDER BY "Total" DESC""",
     tuple(params),
 )
 gru_df = pd.DataFrame(grupos)
@@ -238,10 +238,10 @@ st.dataframe(gru_df, use_container_width=True, hide_index=True)
 st.divider()
 st.subheader("📊 Total de entradas por categoria")
 resumo = query(
-    f"""SELECT COALESCE(p.nome, '{NAO_DEF}') AS Categoria, COUNT(*) AS Qtd,
-        SUM(l.valor) AS Total
+    f"""SELECT COALESCE(p.nome, '{NAO_DEF}') AS "Categoria", COUNT(*) AS "Qtd",
+        SUM(l.valor) AS "Total"
         FROM lancamentos l LEFT JOIN plano_contas p ON p.id=l.plano_conta_id
-        WHERE {where} GROUP BY l.plano_conta_id ORDER BY Total DESC""",
+        WHERE {where} GROUP BY l.plano_conta_id ORDER BY "Total" DESC""",
     tuple(params),
 )
 res_df = pd.DataFrame(resumo)

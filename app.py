@@ -20,11 +20,12 @@ saidas = st.Page("views/saidas.py", title="Saídas", icon="💸", default=True)
 entradas = st.Page("views/entradas.py", title="Entradas", icon="💰")
 painel = st.Page("views/apresentacao.py", title="Painel de Saídas", icon="📊")
 painel_ent = st.Page("views/painel_entradas.py", title="Painel de Entradas", icon="📈")
+analise_fat = st.Page("views/faturamento.py", title="Análise do Faturamento", icon="🔎")
 comparativo = st.Page("views/comparativo.py", title="Comparativo", icon="⚖️")
 transfer = st.Page("views/transferencias.py", title="Transferências entre Contas", icon="🔄")
 contas = st.Page("views/contas.py", title="Contas Bancárias", icon="🏦")
 base = st.Page("views/base_tipos.py", title="Base de Tipos", icon="📒")
 
 pg = st.navigation([importar, boletos, saidas, entradas, painel, painel_ent,
-                    comparativo, transfer, contas, base])
+                    analise_fat, comparativo, transfer, contas, base])
 pg.run()

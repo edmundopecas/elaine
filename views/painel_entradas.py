@@ -99,7 +99,7 @@ st.caption(f"**{titulo}** · {d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/
 
 # ── KPIs ─────────────────────────────────────────────────────────────────────
 k = st.columns(4)
-k[0].metric("💰 Faturamento", brl(tot_fat),
+k[0].metric("💰 Recebimento", brl(tot_fat),
             help="Receita de verdade (venda + aluguel + rendimento). Entra no resultado.")
 k[1].metric("🛒 Vendas", brl(vendas),
             f"{(vendas / tot_fat * 100):.0f}% do faturamento" if tot_fat else None,

@@ -66,7 +66,7 @@ st.caption(f"**Grupo Edmundo** · {d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime
 
 # ── KPIs do grupo ─────────────────────────────────────────────────────────────
 k = st.columns(3)
-k[0].metric("💰 Entrou (faturamento)", brl(tot_e))
+k[0].metric("💰 Entrou (recebimento)", brl(tot_e))
 k[1].metric("💸 Saiu (despesa real)", brl(tot_s))
 k[2].metric("📈 Resultado", brl(tot_r),
             "sobrou" if tot_r >= 0 else "faltou",
@@ -127,3 +127,77 @@ st.dataframe(
 st.caption("Resultado = Faturamento − Despesa real. Não é o lucro contábil "
            "(falta depreciação, impostos sobre lucro etc.), mas mostra se a "
            "operação de cada empresa sobrou ou faltou caixa no período.")
+
+# ── 🏦 Por conta — onde está o caixa ──────────────────────────────────────────
+# Aqui entra TUDO que movimentou a conta (inclusive transferências entre as
+# contas do grupo e aplicações), porque o objetivo é mostrar para onde o
+# dinheiro foi fisicamente — não o resultado de competência.
+st.divider()
+st.subheader("🏦 Por conta — onde está o caixa")
+
+cmov = query(
+    """SELECT c.id cid, e.apelido emp, c.banco, c.descricao,
+              COALESCE(SUM(CASE WHEN l.tipo='entrada' THEN l.valor ELSE 0 END),0) entrou,
+              COALESCE(SUM(CASE WHEN l.tipo='saida'   THEN l.valor ELSE 0 END),0) saiu
+       FROM lancamentos l
+       JOIN contas_bancarias c ON c.id=l.conta_bancaria_id
+       JOIN empresas e ON e.id=c.empresa_id
+       WHERE l.data BETWEEN ? AND ?
+       GROUP BY c.id, e.apelido, c.banco, c.descricao""", par)
+
+if not cmov:
+    st.info("Sem movimento por conta no período.")
+else:
+    contas = [{
+        "Empresa": r["emp"],
+        "Conta": f'{r["banco"]} · {r["descricao"]}',
+        "Entrou": r["entrou"],
+        "Saiu": r["saiu"],
+        "Caixa do período": r["entrou"] - r["saiu"],
+    } for r in cmov]
+    contas.sort(key=lambda c: -c["Caixa do período"])
+    ordem_contas = [c["Conta"] for c in contas]
+    tot_caixa = sum(c["Caixa do período"] for c in contas)
+
+    st.caption(
+        "Movimento **real** de cada conta no período: entra tudo (vendas, "
+        "transferências de outras contas do grupo, aplicações). "
+        "🔴 **negativo = a conta gastou/transferiu mais do que recebeu** — foi "
+        "bancada por outras contas (efeito do caixa centralizado). "
+        "🟢 positivo = a conta segurou o dinheiro. "
+        "É a *variação* do período, não o saldo absoluto (os extratos não trazem "
+        "saldo inicial de todas as contas)."
+    )
+
+    cdf = pd.DataFrame([{"Conta": c["Conta"], "Caixa do período": c["Caixa do período"],
+                         "Empresa": c["Empresa"]} for c in contas])
+    barras_c = (
+        alt.Chart(cdf)
+        .mark_bar(cornerRadiusEnd=3)
+        .encode(
+            x=alt.X("Caixa do período:Q", title=None, axis=alt.Axis(format="~s")),
+            y=alt.Y("Conta:N", sort=ordem_contas, title=None),
+            color=alt.condition(alt.datum["Caixa do período"] >= 0,
+                                 alt.value(VERDE), alt.value(VERMELHO)),
+            tooltip=["Empresa:N", "Conta:N",
+                     alt.Tooltip("Caixa do período:Q", format=",.2f", title="R$")],
+        )
+        .properties(height=60 + 32 * len(contas))
+    )
+    st.altair_chart(barras_c, use_container_width=True)
+
+    st.dataframe(
+        pd.DataFrame(contas), hide_index=True, use_container_width=True,
+        column_config={
+            "Entrou": st.column_config.NumberColumn(format="R$ %.2f"),
+            "Saiu": st.column_config.NumberColumn(format="R$ %.2f"),
+            "Caixa do período": st.column_config.NumberColumn(
+                format="R$ %.2f", help="Entrou − Saiu (tudo, inclusive transferências internas)"),
+        })
+    st.caption(
+        f"Soma do caixa de todas as contas no período: **{brl(tot_caixa)}**. "
+        f"Esse número é o dinheiro que **de fato** circulou e ficou — diferente do "
+        f"resultado de competência ({brl(tot_r)}), que conta a venda/despesa pela "
+        f"data do fato, não pela hora que o dinheiro entrou ou saiu da conta. "
+        f"A diferença vai para aplicações e dinheiro ainda a receber/pagar."
+    )

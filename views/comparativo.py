@@ -74,6 +74,59 @@ k[2].metric("📈 Resultado", brl(tot_r),
 
 st.caption("Só entram aqui os valores que afetam o resultado (DRE). Transferências "
            "entre as contas do grupo e aplicações ficam de fora dos dois lados.")
+
+# ── 🔎 Ponte: do resultado da operação ao caixa que de fato ficou ─────────────
+_nd = query(
+    """SELECT p.nome, l.tipo, SUM(l.valor) v FROM lancamentos l
+       JOIN plano_contas p ON p.id=l.plano_conta_id
+       WHERE p.entra_dre=0 AND l.data BETWEEN ? AND ?
+       GROUP BY p.nome, l.tipo""", par)
+_pend = query(
+    """SELECT l.tipo, SUM(l.valor) v FROM lancamentos l
+       WHERE l.plano_conta_id IS NULL AND l.data BETWEEN ? AND ?
+       GROUP BY l.tipo""", par)
+
+
+def _bucket(nome: str) -> str:
+    if nome == "Aplicação/Resgate Financeiro":
+        return "Aplicações (dinheiro parado, ainda seu)"
+    if nome == "Transferência entre Empresas":
+        return "Transferências entre contas do grupo"
+    if nome.startswith("Pessoal - "):
+        return "Gastos particulares dos sócios"
+    return "Consórcio / empréstimos / saque / outros"
+
+
+bridge: dict[str, float] = {}
+for r in _nd:
+    bridge[_bucket(r["nome"])] = bridge.get(_bucket(r["nome"]), 0.0) + (
+        r["v"] if r["tipo"] == "entrada" else -r["v"])
+pend_net = sum((r["v"] if r["tipo"] == "entrada" else -r["v"]) for r in _pend)
+caixa_calc = tot_r + sum(bridge.values()) + pend_net
+
+with st.expander("🔎 Ver detalhes: por que o resultado não é o que ficou na conta"):
+    st.caption("Tudo aqui vem de extrato — cada lançamento já é dinheiro movimentado "
+               "(não existe 'a receber' nem 'a pagar'). O resultado da operação gera "
+               "caixa, mas parte dele sai para coisas que **não são despesa**:")
+    linhas = [("Resultado da operação (receita − despesa)", tot_r)]
+    for nome in ["Aplicações (dinheiro parado, ainda seu)",
+                 "Gastos particulares dos sócios",
+                 "Transferências entre contas do grupo",
+                 "Consórcio / empréstimos / saque / outros"]:
+        if nome in bridge:
+            linhas.append((nome, bridge[nome]))
+    if pend_net:
+        linhas.append(("Saídas ainda sem categoria (pendentes)", pend_net))
+    linhas.append(("= Caixa que de fato ficou nas contas", caixa_calc))
+    st.dataframe(
+        pd.DataFrame([{" ": n, "R$": v} for n, v in linhas]),
+        hide_index=True, use_container_width=True,
+        column_config={"R$": st.column_config.NumberColumn(format="R$ %.2f")})
+    st.caption("⚠️ As 'Transferências entre contas' aparecem positivas porque algumas "
+               "contas que enviaram dinheiro ainda não estão importadas até o fim do "
+               "período — vemos o dinheiro chegar, mas não sair. Quando completar a "
+               "importação, esse valor cai e o caixa real também.")
+
 st.divider()
 
 # ── Barras agrupadas Entrou × Saiu por empresa ────────────────────────────────
@@ -195,9 +248,12 @@ else:
                 format="R$ %.2f", help="Entrou − Saiu (tudo, inclusive transferências internas)"),
         })
     st.caption(
-        f"Soma do caixa de todas as contas no período: **{brl(tot_caixa)}**. "
-        f"Esse número é o dinheiro que **de fato** circulou e ficou — diferente do "
-        f"resultado de competência ({brl(tot_r)}), que conta a venda/despesa pela "
-        f"data do fato, não pela hora que o dinheiro entrou ou saiu da conta. "
-        f"A diferença vai para aplicações e dinheiro ainda a receber/pagar."
+        f"Soma do caixa de todas as contas no período: **{brl(tot_caixa)}** — o "
+        f"dinheiro que de fato entrou e ficou. É menor que o resultado da operação "
+        f"({brl(tot_r)}) porque parte do que a operação gerou não está na conta "
+        f"corrente: foi para **aplicação** (parado, mas ainda seu), para **gastos "
+        f"particulares dos sócios** e para **consórcio/empréstimos**. Aqui é tudo "
+        f"extrato bancário — não existe valor 'a receber' ou 'a pagar'. "
+        f"⚠️ Parte das contas ainda não está importada até o fim do período, então "
+        f"este caixa está provisoriamente superestimado."
     )

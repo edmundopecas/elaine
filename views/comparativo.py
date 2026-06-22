@@ -131,7 +131,12 @@ for r in _nd:
     bridge[_bucket(r["nome"])] = bridge.get(_bucket(r["nome"]), 0.0) + (
         r["v"] if r["tipo"] == "entrada" else -r["v"])
 pend_net = sum((r["v"] if r["tipo"] == "entrada" else -r["v"]) for r in _pend)
-caixa_calc = tot_r + sum(bridge.values()) + pend_net
+# A transferência entre as PRÓPRIAS contas do grupo deveria zerar (sai de uma,
+# entra na outra). O saldo que sobra é só distorção de imports incompletos —
+# tiramos do corpo da ponte e mostramos como ajuste à parte, pra não enganar.
+transf = bridge.pop("Transferências entre contas do grupo", 0.0)
+caixa_operacao = tot_r + sum(bridge.values()) + pend_net   # caixa que deveria ter ficado
+caixa_calc = caixa_operacao + transf                       # caixa observado hoje
 
 with st.expander("🔎 Ver detalhes: por que o resultado não é o que ficou na conta"):
     st.caption("Tudo aqui vem de extrato — cada lançamento já é dinheiro movimentado "
@@ -140,21 +145,27 @@ with st.expander("🔎 Ver detalhes: por que o resultado não é o que ficou na 
     linhas = [("Resultado da operação (receita − despesa)", tot_r)]
     for nome in ["Aplicações (dinheiro parado, ainda seu)",
                  "Gastos particulares dos sócios",
-                 "Transferências entre contas do grupo",
                  "Consórcio / empréstimos / saque / outros"]:
         if nome in bridge:
             linhas.append((nome, bridge[nome]))
     if pend_net:
         linhas.append(("Saídas ainda sem categoria (pendentes)", pend_net))
-    linhas.append(("= Caixa que de fato ficou nas contas", caixa_calc))
+    linhas.append(("= Caixa que deveria ter ficado (pela operação)", caixa_operacao))
+    if transf:
+        linhas.append(("(+) Transferências entre contas ainda não pareadas (defeito de "
+                       "import)", transf))
+    linhas.append(("= Caixa observado hoje nas contas", caixa_calc))
     st.dataframe(
         pd.DataFrame([{" ": n, "R$": v} for n, v in linhas]),
         hide_index=True, use_container_width=True,
         column_config={"R$": st.column_config.NumberColumn(format="R$ %.2f")})
-    st.caption("⚠️ As 'Transferências entre contas' aparecem positivas porque algumas "
-               "contas que enviaram dinheiro ainda não estão importadas até o fim do "
-               "período — vemos o dinheiro chegar, mas não sair. Quando completar a "
-               "importação, esse valor cai e o caixa real também.")
+    st.caption("⚠️ Transferência entre as suas próprias contas **não é dinheiro novo** "
+               "— deveria zerar (sai de uma conta, entra na outra). Esse saldo de "
+               f"**{brl(transf)}** aparece só porque algumas contas que enviaram "
+               "dinheiro ainda não foram importadas até o fim do período: vemos o "
+               "dinheiro chegar, mas não sair. Quando completar a importação, ele cai "
+               "para perto de zero e o 'caixa observado' se aproxima do 'caixa que "
+               "deveria ter ficado'.")
 
 st.divider()
 

@@ -64,12 +64,14 @@ tot_r = tot_e - tot_s
 
 st.caption(f"**Grupo Edmundo** · {d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}")
 
-# ── Retiradas dos sócios + consórcio + empréstimo (saíram do caixa, mas não são
-#    despesa da operação) — Filipe quer abater porque no fim o dinheiro saiu. ────
+# ── Tudo que saiu do caixa mas não é despesa da operação (retiradas dos sócios,
+#    consórcio, empréstimo, saque, valores a recuperar) — Filipe quer abater
+#    porque no fim o dinheiro saiu. Ficam de fora só transferências entre as
+#    contas (id 31), aporte de sócio (32) e aplicações (33: dinheiro ainda seu).─
 retiradas = query(
     """SELECT COALESCE(SUM(CASE WHEN l.tipo='saida' THEN l.valor ELSE -l.valor END),0) v
        FROM lancamentos l JOIN plano_contas p ON p.id=l.plano_conta_id
-       WHERE p.entra_dre=0 AND (p.grupo='Gastos Pessoais (Sócios)' OR p.id IN (37, 39))
+       WHERE p.entra_dre=0 AND p.id NOT IN (31, 32, 33)
          AND l.data BETWEEN ? AND ?""", par)[0]["v"]
 sobra_final = tot_r - retiradas
 
@@ -82,22 +84,25 @@ k[2].metric("📈 Resultado da operação", brl(tot_r),
             delta_color="normal" if tot_r >= 0 else "inverse")
 
 st.caption("Resultado da operação = recebimento − despesa real. Mostra se a operação "
-           "em si se paga. Ainda **não** desconta o que os sócios tiraram, consórcio "
-           "nem empréstimo.")
+           "em si se paga. Ainda **não** desconta o que os sócios tiraram, consórcio, "
+           "empréstimo nem saque.")
 
 # Destaque: o que sobrou de fato, já abatendo o que saiu de caixa fora da operação
 s = st.columns(2)
 s[0].metric("💵 Sobrou de fato (caixa da operação)", brl(sobra_final),
-            help="Resultado da operação menos o que saiu de caixa e não é despesa: "
-                 "gastos pessoais dos sócios, consórcio e pagamento de empréstimo.")
-s[1].metric("➖ Retiradas dos sócios + consórcio + empréstimo", brl(retiradas),
-            delta_color="off",
-            help="Saiu do caixa, mas não é despesa da operação (é o dono tirando "
-                 "dinheiro / virando patrimônio / quitando dívida).")
-st.caption(f"Da operação sobraram **{brl(tot_r)}**; abatendo as retiradas dos sócios, "
-           f"consórcio e empréstimo (**{brl(retiradas)}**), o que de fato sobrou em "
-           f"caixa pela operação foi **{brl(sobra_final)}**. (As aplicações não entram "
-           f"aqui porque o dinheiro continua seu, só rendendo.)")
+            help="Resultado da operação menos tudo que saiu de caixa e não é despesa: "
+                 "gastos pessoais dos sócios, consórcio, empréstimo, saque e valores "
+                 "a recuperar.")
+s[1].metric("➖ Saídas que não são despesa (sócios, consórcio, empréstimo, saque)",
+            brl(retiradas), delta_color="off",
+            help="Saiu do caixa, mas não é despesa da operação (dono tirando dinheiro, "
+                 "virando patrimônio, quitando dívida, saque). Aplicações e "
+                 "transferências entre contas ficam de fora.")
+st.caption(f"Da operação sobraram **{brl(tot_r)}**; abatendo tudo que saiu de caixa e "
+           f"não é despesa — sócios, consórcio, empréstimo, saque e valores a recuperar "
+           f"(**{brl(retiradas)}**) — o que de fato sobrou em caixa pela operação foi "
+           f"**{brl(sobra_final)}**. (Aplicações não entram: o dinheiro continua seu, "
+           f"só rendendo.)")
 
 # ── 🔎 Ponte: do resultado da operação ao caixa que de fato ficou ─────────────
 _nd = query(

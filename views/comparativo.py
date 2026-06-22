@@ -286,3 +286,96 @@ else:
         f"⚠️ Parte das contas ainda não está importada até o fim do período, então "
         f"este caixa está provisoriamente superestimado."
     )
+
+# ── 💰 Onde está aplicado ─────────────────────────────────────────────────────
+st.divider()
+st.subheader("💰 Onde está aplicado")
+
+aprows = query(
+    """SELECT e.apelido emp, c.banco, c.descricao,
+              COALESCE(SUM(CASE WHEN l.tipo='saida'   THEN l.valor ELSE 0 END),0) aplicado,
+              COALESCE(SUM(CASE WHEN l.tipo='entrada' THEN l.valor ELSE 0 END),0) resgatado,
+              COUNT(*) n
+       FROM lancamentos l
+       JOIN contas_bancarias c ON c.id=l.conta_bancaria_id
+       JOIN empresas e ON e.id=c.empresa_id
+       WHERE l.plano_conta_id=33 AND l.data BETWEEN ? AND ?
+       GROUP BY e.apelido, c.banco, c.descricao""", par)
+
+if not aprows:
+    st.info("Nenhuma aplicação ou resgate no período.")
+else:
+    def _situacao(aplicado: float, liq: float, n: int) -> str:
+        if aplicado and abs(liq) < max(100.0, 0.02 * aplicado) and n > 1:
+            return "🔁 vai-e-vem diário (não acumula)"
+        if liq > 0:
+            return "📥 acumulou na aplicação"
+        if liq < 0:
+            return "📤 resgatou (tirou da aplicação)"
+        return "—"
+
+    aplic = []
+    for r in aprows:
+        liq = r["aplicado"] - r["resgatado"]
+        aplic.append({
+            "Empresa": r["emp"],
+            "Conta": f'{r["banco"]} · {r["descricao"]}',
+            "Aplicado": r["aplicado"],
+            "Resgatado": r["resgatado"],
+            "Líquido aplicado": liq,
+            "Situação": _situacao(r["aplicado"], liq, r["n"]),
+        })
+    aplic.sort(key=lambda a: -a["Líquido aplicado"])
+    tot_liq = sum(a["Líquido aplicado"] for a in aplic)
+    acumulado = sum(a["Líquido aplicado"] for a in aplic if a["Líquido aplicado"] > 0)
+
+    m = st.columns(2)
+    m[0].metric("📥 Ficou aplicado no período (líquido)", brl(tot_liq))
+    m[1].metric("💼 Total enviado para aplicação (bruto)",
+                brl(sum(a["Aplicado"] for a in aplic)), delta_color="off")
+
+    st.caption(
+        "Quanto dinheiro foi **parar em aplicação** em cada banco no período "
+        "(aplicado − resgatado). 🔁 contas marcadas como *vai-e-vem* aplicam e "
+        "resgatam o mesmo valor todo dia — não acumulam nada, é só o banco rendendo "
+        "o saldo do dia. ⚠️ É o **movimento do período**, não o saldo total da "
+        "aplicação (o extrato não traz o saldo da conta-aplicação)."
+    )
+
+    # Gráfico só das contas que de fato acumulam/resgatam (ignora vai-e-vem ~0)
+    reais = [a for a in aplic if not a["Situação"].startswith("🔁")]
+    if reais:
+        adf = pd.DataFrame([{"Conta": a["Conta"], "Líquido aplicado": a["Líquido aplicado"],
+                             "Empresa": a["Empresa"]} for a in reais])
+        ch_ap = (
+            alt.Chart(adf)
+            .mark_bar(cornerRadiusEnd=3)
+            .encode(
+                x=alt.X("Líquido aplicado:Q", title=None, axis=alt.Axis(format="~s")),
+                y=alt.Y("Conta:N", sort=[a["Conta"] for a in reais], title=None),
+                color=alt.condition(alt.datum["Líquido aplicado"] >= 0,
+                                     alt.value(VERDE), alt.value(VERMELHO)),
+                tooltip=["Empresa:N", "Conta:N",
+                         alt.Tooltip("Líquido aplicado:Q", format=",.2f", title="R$")],
+            )
+            .properties(height=60 + 32 * len(reais))
+        )
+        st.altair_chart(ch_ap, use_container_width=True)
+
+    st.dataframe(
+        pd.DataFrame(aplic), hide_index=True, use_container_width=True,
+        column_config={
+            "Aplicado": st.column_config.NumberColumn(format="R$ %.2f"),
+            "Resgatado": st.column_config.NumberColumn(format="R$ %.2f"),
+            "Líquido aplicado": st.column_config.NumberColumn(
+                format="R$ %.2f", help="Aplicado − Resgatado no período"),
+        })
+    maior = aplic[0]
+    st.caption(
+        f"No período ficaram **{brl(acumulado)}** parados em aplicação"
+        + (f" — o maior acúmulo foi em **{maior['Conta']}** ({brl(maior['Líquido aplicado'])})."
+           if maior["Líquido aplicado"] > 0 else ".")
+        + " Pra saber o **montante total** acumulado em cada aplicação (não só o de "
+          "junho), eu preciso do saldo da conta-aplicação ou do saldo inicial — me "
+          "passa que eu somo."
+    )

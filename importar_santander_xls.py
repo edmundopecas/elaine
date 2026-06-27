@@ -111,7 +111,9 @@ def main(commit: bool) -> None:
         existentes = [dict(r) for r in query(
             "SELECT data, valor, tipo, documento, descricao, linha_hash "
             "FROM lancamentos WHERE conta_bancaria_id=?", (conta_id,))]
-        a_inserir, duplicados = planejar_insercao(movs, existentes)
+        hashes_globais = {r["linha_hash"] for r in query(
+            "SELECT linha_hash FROM lancamentos WHERE linha_hash IS NOT NULL")}
+        a_inserir, duplicados = planejar_insercao(movs, existentes, hashes_globais)
         ent = sum(1 for m, _ in a_inserir if m["tipo"] == "entrada")
         sai = sum(1 for m, _ in a_inserir if m["tipo"] == "saida")
         print(f"\n=== conta {conta_id} ({conta['banco']} {conta['descricao']}) ===")

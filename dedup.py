@@ -43,7 +43,8 @@ def _content_key(data_iso: str, valor: Any, tipo: str | None,
     )
 
 
-def planejar_insercao(movimentos: list[dict], existentes: list[dict]) -> tuple[list[tuple[dict, str]], int]:
+def planejar_insercao(movimentos: list[dict], existentes: list[dict],
+                      hashes_globais: set[str] | None = None) -> tuple[list[tuple[dict, str]], int]:
     """Decide o que inserir, deduplicando por multiset de conteúdo.
 
     Args:
@@ -51,6 +52,13 @@ def planejar_insercao(movimentos: list[dict], existentes: list[dict]) -> tuple[l
             documento, historico, linha_hash).
         existentes: linhas já no banco daquela conta — dicts com data, valor, tipo,
             documento, descricao, linha_hash.
+        hashes_globais: conjunto de linha_hash já usados em QUALQUER conta. O dedup
+            por multiset é por conta (`existentes`), mas o índice UNIQUE em
+            `linha_hash` é GLOBAL — duas contas podem ter um movimento de conteúdo
+            idêntico (ex.: tarifa SafraPay R$0,15 no mesmo dia na Matriz e na Filial)
+            cujo hash bate. Sem este conjunto, o sufixo só evitaria colisão dentro da
+            própria conta e o INSERT estouraria UniqueViolation. Passe os hashes de
+            todas as contas pra garantir sufixo único globalmente.
 
     Returns:
         (a_inserir, duplicados) onde a_inserir é uma lista de (movimento, linha_hash_único)
@@ -61,6 +69,8 @@ def planejar_insercao(movimentos: list[dict], existentes: list[dict]) -> tuple[l
         for r in existentes
     )
     usados = {r["linha_hash"] for r in existentes if r.get("linha_hash")}
+    if hashes_globais:
+        usados |= hashes_globais
 
     vistos: Counter = Counter()
     a_inserir: list[tuple[dict, str]] = []

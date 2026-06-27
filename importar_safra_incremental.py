@@ -70,7 +70,9 @@ def importar_arquivo(caminho: str) -> None:
     existentes = [dict(r) for r in query(
         "SELECT data, valor, tipo, documento, descricao, linha_hash "
         "FROM lancamentos WHERE conta_bancaria_id=?", (conta_id,))]
-    a_inserir, ja_existe = planejar_insercao(candidatos, existentes)
+    hashes_globais = {r["linha_hash"] for r in query(
+        "SELECT linha_hash FROM lancamentos WHERE linha_hash IS NOT NULL")}
+    a_inserir, ja_existe = planejar_insercao(candidatos, existentes, hashes_globais)
 
     regras = regras_ativas()
     cat_transf = id_categoria_transferencia_interna()

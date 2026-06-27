@@ -95,7 +95,9 @@ def main(caminho: str, apelido: str, banco: str, conta_desc: str) -> None:
     existentes = [dict(r) for r in query(
         "SELECT data, valor, tipo, documento, descricao, linha_hash "
         "FROM lancamentos WHERE conta_bancaria_id=?", (conta_id,))]
-    a_inserir, duplicados = planejar_insercao(movimentos, existentes)
+    hashes_globais = {r["linha_hash"] for r in query(
+        "SELECT linha_hash FROM lancamentos WHERE linha_hash IS NOT NULL")}
+    a_inserir, duplicados = planejar_insercao(movimentos, existentes, hashes_globais)
 
     importados = 0
     for m, linha_hash in a_inserir:

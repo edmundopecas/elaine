@@ -10,9 +10,10 @@ Uso:
 """
 from __future__ import annotations
 
-import sqlite3
 from collections import defaultdict
 from datetime import date, datetime
+
+from db import query   # lê do banco ativo (Supabase se ELAINE_DATABASE_URL setada)
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -39,10 +40,26 @@ def dt(s: str) -> str:
     return datetime.fromisoformat(s).strftime("%d/%m/%Y")
 
 
+import re
+
+_PREFIXOS = re.compile(
+    r"^(pagamentos? a fornecedores|pix enviado(\s*-)?|pix recebido(\s*-)?|"
+    r"t[íi]tulo/boleto( de outros bancos| ita[úu])?(\s*-)?|"
+    r"transfer[êe]ncia( enviada)?|ted|doc)\s*",
+    re.IGNORECASE,
+)
+
+
+def _limpa_nome(s: str) -> str:
+    """Tira prefixos de banco/tipo do começo do nome (PAGAMENTOS A FORNECEDORES,
+    Pix Enviado, Título/boleto …) pra sobrar só o nome do beneficiário."""
+    s = (s or "").strip()
+    novo = _PREFIXOS.sub("", s).strip(" -–—")
+    return (novo or s).title()
+
+
 def main():
-    con = sqlite3.connect("elaine.db")
-    con.row_factory = sqlite3.Row
-    rows = con.execute(
+    rows = query(
         """SELECT l.data, l.contraparte, l.descricao, ABS(l.valor) AS valor,
                   l.plano_conta_id AS cat_id, p.nome AS cat, e.apelido AS emp
            FROM lancamentos l
@@ -51,7 +68,7 @@ def main():
            WHERE (l.plano_conta_id = ? OR p.grupo LIKE '%cios%') AND l.tipo='saida'
            ORDER BY l.data""",
         (CAT_PROLABORE,),
-    ).fetchall()
+    )
 
     if not rows:
         print("Sem lançamentos de sócios.")
@@ -74,6 +91,9 @@ def main():
                          textColor=ROXO, spaceBefore=12, spaceAfter=4)
     nota = ParagraphStyle("nota", parent=styles["Normal"], fontSize=8.5,
                           textColor=colors.HexColor("#666666"), leading=12)
+    cel = ParagraphStyle("cel", parent=styles["Normal"], fontSize=8.5,
+                         textColor=ESCURO, leading=10)
+    cel_b = ParagraphStyle("cel_b", parent=cel, fontName="Helvetica-Bold")
 
     elems = []
     elems.append(Paragraph("Gastos Finais dos Sócios", h1))
@@ -109,7 +129,7 @@ def main():
         elems.append(Paragraph(titulo, sec))
         chave = defaultdict(list)
         for r in itens:
-            quem = (r["contraparte"] or r["descricao"] or "(sem nome)").strip()
+            quem = _limpa_nome(r["contraparte"] or r["descricao"] or "(sem nome)")
             k = (quem, r["cat"]) if com_categoria else (quem,)
             chave[k].append(r)
         linhas = []
@@ -120,19 +140,23 @@ def main():
         linhas.sort(key=lambda x: x[3], reverse=True)
 
         if com_categoria:
-            head = ["Beneficiário", "Tipo de gasto", "Empresa", "Pagtos", "Total"]
-            colw = [55 * mm, 44 * mm, 30 * mm, 16 * mm, 33 * mm]
+            head = ["Beneficiário", "Tipo de gasto", "Empresa", "Qtd", "Total"]
+            colw = [52 * mm, 40 * mm, 30 * mm, 14 * mm, 32 * mm]
         else:
-            head = ["Sócio / Beneficiário", "Empresa", "Pagtos", "Total"]
-            colw = [88 * mm, 38 * mm, 20 * mm, 35 * mm]
-        data = [head]
+            head = ["Sócio / Beneficiário", "Empresa", "Qtd", "Total"]
+            colw = [85 * mm, 38 * mm, 18 * mm, 35 * mm]
+        # cabeçalho em Paragraph branco; células de texto em Paragraph que QUEBRAM linha
+        head_st = ParagraphStyle("h", parent=cel_b, textColor=colors.white)
+        data = [[Paragraph(h, head_st) for h in head]]
         for k, n, emp, tot in linhas:
             if com_categoria:
-                data.append([k[0][:40], k[1].replace("Pessoal - ", ""), emp, str(n), brl(tot)])
+                data.append([Paragraph(k[0], cel),
+                             Paragraph(k[1].replace("Pessoal - ", ""), cel),
+                             Paragraph(emp, cel), str(n), brl(tot)])
             else:
-                data.append([k[0][:50], emp, str(n), brl(tot)])
+                data.append([Paragraph(k[0], cel), Paragraph(emp, cel), str(n), brl(tot)])
         tot_geral = sum(x[3] for x in linhas)
-        data.append(["TOTAL"] + [""] * (len(head) - 2) + [brl(tot_geral)])
+        data.append([Paragraph("TOTAL", cel_b)] + [""] * (len(head) - 2) + [brl(tot_geral)])
 
         tbl = Table(data, colWidths=colw)
         tbl.setStyle(TableStyle([
@@ -140,6 +164,7 @@ def main():
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
             ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("ALIGN", (-2, 0), (-1, -1), "RIGHT"),
             ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#f4f2f7")]),
             ("LINEBELOW", (0, 0), (-1, -1), 0.3, colors.HexColor("#e0e0e0")),

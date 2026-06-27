@@ -69,7 +69,12 @@ def main(caminho: str, apelido: str, banco: str, conta_desc: str) -> None:
     for m in movimentos:
         h = _norm(m["historico"])
         interna = empresa_do_grupo_por_cnpj(m.get("cnpj_contraparte"))
-        if interna and cat_transf:
+        # Só é "Transferência entre Empresas" quando o dinheiro vem de OUTRA empresa
+        # do grupo. Crédito com o CNPJ da PRÓPRIA empresa da conta = venda no PIX da
+        # loja (a chave PIX é o CNPJ) ou movimento entre contas próprias — NÃO marcar
+        # como transferência aqui, senão a venda some da DRE (fix 23/06). Deixa as
+        # regras decidirem (PIX RECEBIDO -> Receita de Vendas, ou pendente).
+        if interna and interna["id"] != emp_id and cat_transf:
             m["_plano_id"], m["_regra"], m["_classif"] = cat_transf, None, True
         elif cat_aplic_id and any(t in h for t in MECANICOS_APLICACAO):
             m["_plano_id"], m["_regra"], m["_classif"] = cat_aplic_id, None, True

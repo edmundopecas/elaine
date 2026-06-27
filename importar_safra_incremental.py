@@ -88,7 +88,9 @@ def importar_arquivo(caminho: str) -> None:
         # classifica (interna por CNPJ -> mecânico aplicação -> regras)
         h = _norm(m["historico"])
         interna = empresa_do_grupo_por_cnpj(m.get("cnpj_contraparte"))
-        if interna and cat_transf:
+        # Só transferência se vier de OUTRA empresa do grupo; CNPJ próprio = venda
+        # no PIX da loja, deixa as regras decidirem (fix 23/06).
+        if interna and interna["id"] != emp_id and cat_transf:
             plano_id, regra, classif = cat_transf, None, True
         elif cat_aplic_id and any(t in h for t in MECANICOS_APLICACAO):
             plano_id, regra, classif = cat_aplic_id, None, True

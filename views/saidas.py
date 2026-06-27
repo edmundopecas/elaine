@@ -31,7 +31,15 @@ cats = query("SELECT id, nome FROM plano_contas WHERE ativo=1 "
              "AND tipo IN ('despesa','transferencia') ORDER BY ordem")
 nome_para_id = {c["nome"]: c["id"] for c in cats}
 NAO_DEF = "— não definido —"
-opcoes = [NAO_DEF] + list(nome_para_id.keys())
+opcoes = [NAO_DEF] + list(nome_para_id.keys())   # usado no editor "O que foi?"
+
+# Filtro de categoria com GRUPOS: escolher um 📂 grupo filtra TODAS as categorias
+# dele de uma vez (ex.: 📂 Despesas com Pessoal = salários + pró-labore + 13º…).
+GRUPO_PREFIXO = "📂 "
+grupos_cat = [g["grupo"] for g in query(
+    "SELECT DISTINCT grupo FROM plano_contas WHERE ativo=1 AND grupo IS NOT NULL "
+    "AND tipo IN ('despesa','transferencia') ORDER BY grupo")]
+opcoes_filtro = [NAO_DEF] + [GRUPO_PREFIXO + g for g in grupos_cat] + list(nome_para_id.keys())
 
 # ── Filtros: empresa e período (de / até) ────────────────────────────────────
 empresas = query("SELECT id, apelido FROM empresas WHERE ativa=1 ORDER BY apelido")
@@ -54,7 +62,7 @@ def _parse_valor_br(s: str) -> float | None:
 
 c1, c2, c3 = st.columns([1, 1, 2])
 sel_emp = c1.selectbox("Empresa", ["Todas"] + [e["apelido"] for e in empresas])
-sel_cat = c2.selectbox("Categoria", ["Todas"] + opcoes)
+sel_cat = c2.selectbox("Categoria (📂 = grupo inteiro)", ["Todas"] + opcoes_filtro)
 periodo = c3.date_input("Período (de / até)", value=(lo, hi),
                         min_value=lo, max_value=hi, format="DD/MM/YYYY")
 
@@ -72,9 +80,14 @@ cond, params = ["l.tipo='saida'"], []
 if sel_emp != "Todas":
     emp_id = next(e["id"] for e in empresas if e["apelido"] == sel_emp)
     cond.append("l.empresa_id=?"); params.append(emp_id)
-# Filtro por categoria: "— não definido —" pega os sem categoria (NULL)
+# Filtro por categoria: "— não definido —" pega os sem categoria (NULL); um 📂 grupo
+# pega TODAS as categorias daquele grupo (subquery por l só — funciona em toda query);
+# senão, a categoria exata.
 if sel_cat == NAO_DEF:
     cond.append("l.plano_conta_id IS NULL")
+elif sel_cat.startswith(GRUPO_PREFIXO):
+    cond.append("l.plano_conta_id IN (SELECT id FROM plano_contas WHERE grupo=?)")
+    params.append(sel_cat[len(GRUPO_PREFIXO):])
 elif sel_cat != "Todas":
     cond.append("l.plano_conta_id=?"); params.append(nome_para_id[sel_cat])
 cond.append("l.data BETWEEN ? AND ?")

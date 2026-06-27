@@ -66,7 +66,8 @@ def main(caminho: str) -> None:
 
     for m in movimentos:
         interna = empresa_do_grupo_por_cnpj(m.get("cnpj_contraparte"))
-        if interna and cat_transf:
+        # Só transferência se vier de OUTRA empresa do grupo; CNPJ próprio = venda (fix 23/06).
+        if interna and interna["id"] != emp_id and cat_transf:
             m["_plano_id"], m["_regra"], m["_classif"] = cat_transf, None, True
         elif "rende facil" in _norm(m["historico"]) and cat_aplic_id:
             m["_plano_id"], m["_regra"], m["_classif"] = cat_aplic_id, None, True

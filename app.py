@@ -18,14 +18,16 @@ importar = st.Page("views/importar.py", title="Importar Extrato", icon="📥")
 boletos = st.Page("views/boletos_dda.py", title="Detalhar Boletos DDA", icon="📄")
 saidas = st.Page("views/saidas.py", title="Saídas", icon="💸", default=True)
 entradas = st.Page("views/entradas.py", title="Entradas", icon="💰")
+pendencias = st.Page("views/pendencias.py", title="Pendências", icon="⏳")
 painel = st.Page("views/apresentacao.py", title="Painel de Saídas", icon="📊")
 painel_ent = st.Page("views/painel_entradas.py", title="Painel de Entradas", icon="📈")
 analise_fat = st.Page("views/faturamento.py", title="Análise do Faturamento", icon="🔎")
 comparativo = st.Page("views/comparativo.py", title="Comparativo", icon="⚖️")
+emprestimos = st.Page("views/emprestimos.py", title="Empréstimos", icon="🏦")
 transfer = st.Page("views/transferencias.py", title="Transferências entre Contas", icon="🔄")
 contas = st.Page("views/contas.py", title="Contas Bancárias", icon="🏦")
 base = st.Page("views/base_tipos.py", title="Base de Tipos", icon="📒")
 
-pg = st.navigation([importar, boletos, saidas, entradas, painel, painel_ent,
-                    analise_fat, comparativo, transfer, contas, base])
+pg = st.navigation([importar, boletos, saidas, entradas, pendencias, painel, painel_ent,
+                    analise_fat, comparativo, emprestimos, transfer, contas, base])
 pg.run()

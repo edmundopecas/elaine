@@ -45,10 +45,13 @@ def _coluna(cols, *chaves):
     return None
 
 
-def main(path: str, commit: bool) -> None:
+def main(path: str, commit: bool, sem_fallback: bool = False) -> None:
     CMV = query_one("SELECT id FROM plano_contas WHERE nome LIKE '%Mercadoria%' "
                     "AND tipo='despesa' ORDER BY ordem LIMIT 1")
     CMV_ID = CMV["id"] if CMV else None
+    # Com --sem-fallback: boleto sem regra na Base de Tipos NÃO vira Mercadoria;
+    # entra PENDENTE (plano nulo, classificado=0) pro Filipe classificar na mão.
+    FALLBACK_ID = None if sem_fallback else CMV_ID
 
     bruto = pd.read_excel(path, header=None)
     hi = _achar_cabecalho(bruto)
@@ -137,16 +140,17 @@ def main(path: str, commit: bool) -> None:
     for _, b in prev.iterrows():
         fav = str(b[c_fav]).strip()
         regra = classificar_movimento(fav, "saida", emp_id, regras)
-        pid = regra["plano_conta_id"] if regra else CMV_ID
+        pid = regra["plano_conta_id"] if regra else FALLBACK_ID
         if regra:
             n_regra += 1
         else:
             n_cmv += 1
-        nome = planos.get(pid, "?")
+        nome = planos.get(pid, "— PENDENTE (sem regra) —")
         cat_count[nome] = cat_count.get(nome, 0) + float(b["_valor"])
+    destino = "→ PENDENTE (você classifica)" if sem_fallback else "→ Mercadoria"
     print(f"\nClassificação prevista dos {len(prev)} boletos a processar:")
     print(f"  · por regra (Base de Tipos): {n_regra}")
-    print(f"  · sem regra → Mercadoria:    {n_cmv}")
+    print(f"  · sem regra {destino}: {n_cmv}")
     print("  Por categoria (valor):")
     for nome, v in sorted(cat_count.items(), key=lambda x: -x[1]):
         print(f"    - {nome:<35}R$ {v:>14,.2f}")
@@ -164,8 +168,13 @@ def main(path: str, commit: bool) -> None:
         for _, b in df[df["_dia"] == dia].iterrows():
             fav = str(b[c_fav]).strip()
             regra = classificar_movimento(fav, "saida", emp_id, regras)
-            pid = regra["plano_conta_id"] if regra else CMV_ID
-            h = hashlib.sha256(f"dda-detalhe|{dia}|{b.get(c_cnpj)}|{fav}|{b['_valor']:.2f}"
+            pid = regra["plano_conta_id"] if regra else FALLBACK_ID
+            classif = 1 if pid is not None else 0
+            # documento (nº do DDA) entra no hash: dois boletos idênticos no mesmo dia
+            # (mesmo favorecido/CNPJ/valor) têm documentos distintos — sem ele um deles
+            # colidia e era pulado, deixando o dia sem fechar (fix 29/06).
+            doc = str(b.get(c_doc)).strip() if c_doc else ""
+            h = hashlib.sha256(f"dda-detalhe|{dia}|{b.get(c_cnpj)}|{fav}|{b['_valor']:.2f}|{doc}"
                                .encode()).hexdigest()
             if query_one("SELECT 1 FROM lancamentos WHERE linha_hash=?", (h,)):
                 continue
@@ -176,7 +185,7 @@ def main(path: str, commit: bool) -> None:
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (emp_id, conta_id, dia, f"BOLETO DDA - {fav}", fav, _digitos(b.get(c_cnpj)),
                  (str(b.get(c_doc)).strip() if c_doc else None) or None, float(b["_valor"]), "saida",
-                 pid, 1, "dda-detalhe", h,
+                 pid, classif, "dda-detalhe", h,
                  "Detalhe do pagamento DDA (relatorio Safra Por Pagamentos)"))
             total_inseridos += 1
     print(f"\n[COMMIT] {total_inseridos} boleto(s) detalhado(s) em {len(a_processar)} dia(s).")
@@ -184,5 +193,6 @@ def main(path: str, commit: bool) -> None:
 
 if __name__ == "__main__":
     commit = "--commit" in sys.argv
+    sem_fallback = "--sem-fallback" in sys.argv
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    main(args[0], commit)
+    main(args[0], commit, sem_fallback)

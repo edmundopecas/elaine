@@ -78,6 +78,10 @@ socios_fora = query(
         JOIN plano_contas p ON p.id=l.plano_conta_id
         WHERE l.tipo='saida' AND p.grupo='Gastos Pessoais (Sócios)'
           AND l.data BETWEEN ? AND ?{emp_sql}""", par_t)[0]["v"]
+saque_socios = query(
+    f"""SELECT COALESCE(SUM(l.valor),0) v FROM lancamentos l
+        WHERE l.plano_conta_id=34 AND l.tipo='saida'
+          AND l.data BETWEEN ? AND ?{emp_sql}""", par_t)[0]["v"]
 
 pend_row = query(
     f"""SELECT COUNT(*) n, COALESCE(SUM(l.valor),0) v FROM lancamentos l
@@ -104,6 +108,8 @@ pessoal = por_grupo.get("Despesas com Pessoal", 0.0)
 financeiras = por_grupo.get("Despesas Financeiras", 0.0)
 prolabore = por_grupo.get("Sócios", 0.0)
 retiradas_socios = prolabore + float(socios_fora)
+# retirada TOTAL dos sócios (pró-labore na DRE + gastos pessoais + saque, fora DRE)
+retirada_socios_total = prolabore + float(socios_fora) + float(saque_socios)
 
 if receita == 0 and not cats:
     st.info("Sem dados classificados no período/empresa selecionados.")
@@ -236,15 +242,22 @@ with t3:
         "Despesas com Pessoal": "mantem", "Ocupação": "mantem",
         "Despesas Administrativas": "mantem", "Tributos": "mantem",
         "Deduções": "mantem", "Construção": "mantem",
-        "Sócios": "drena",  # pró-labore = retirada dos donos (decisão do Filipe)
         "Despesas Financeiras": "drena",
     }
     CAT_OVERRIDE = {"Rompimento de Contrato": "drena"}
 
     buckets = {"gera": [], "mantem": [], "drena": []}
     for c in cats:
+        if c["grupo"] == "Sócios":
+            continue  # sócios entram consolidados abaixo (pró-labore + pessoais + saque)
         b = CAT_OVERRIDE.get(c["nome"]) or GRUPO_BUCKET.get(c["grupo"], "mantem")
         buckets[b].append((c["nome"], float(c["v"])))
+    # Retirada COMPLETA dos sócios (não só o pró-labore): pró-labore + gastos
+    # pessoais pagos pela empresa + saque em dinheiro → tudo dreno de caixa.
+    if retirada_socios_total:
+        buckets["drena"].append(
+            ("Retirada dos sócios (pró-labore + gastos pessoais + saque)",
+             retirada_socios_total))
     tot = {b: sum(v for _, v in lst) for b, lst in buckets.items()}
     total_desp = sum(tot.values()) or 1
 
@@ -273,9 +286,10 @@ with t3:
     if tot["drena"]:
         st.markdown(
             f"<div style='background:{VERMELHO};color:#F3EFE5;padding:14px 18px;border-radius:10px'>"
-            f"🎯 <b>{brl(tot['drena'])}</b> em gastos que só drenam caixa. Se renegociar "
-            f"metade disso, sobram <b>{brl(tot['drena']/2)}</b> a mais no bolso todo mês, "
-            f"sem tocar em nada que gera venda.</div>", unsafe_allow_html=True)
+            f"🎯 <b>{brl(tot['drena'])}</b> saíram do caixa sem gerar nem sustentar venda. "
+            f"Os juros e tarifas do banco dá pra <b>renegociar</b>; a retirada dos sócios "
+            f"(<b>{brl(retirada_socios_total)}</b>) dá pra <b>planejar</b>. É o primeiro "
+            f"lugar pra olhar quando o caixa apertar.</div>", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — Painel de 5 minutos (6 KPIs)

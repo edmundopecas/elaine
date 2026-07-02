@@ -29,6 +29,11 @@ transfer = st.Page("views/transferencias.py", title="Transferências entre Conta
 contas = st.Page("views/contas.py", title="Contas Bancárias", icon="🏦")
 base = st.Page("views/base_tipos.py", title="Base de Tipos", icon="📒")
 
-pg = st.navigation([importar, boletos, saidas, entradas, pendencias, diretoria, painel,
-                    painel_ent, analise_fat, comparativo, emprestimos, transfer, contas, base])
+# Menu em seções: a de cima é o destaque gerencial (Elaine começa por aqui);
+# a de baixo é o operacional do dia a dia. Saídas segue como página default.
+pg = st.navigation({
+    "⭐ Para a Diretoria": [diretoria, comparativo],
+    "Operação": [saidas, entradas, pendencias, importar, boletos, painel,
+                 painel_ent, analise_fat, emprestimos, transfer, contas, base],
+})
 pg.run()

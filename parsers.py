@@ -353,13 +353,275 @@ def parse_ofx(file_bytes: bytes) -> list[dict[str, Any]]:
 
 
 # ── Dispatcher ───────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Extratos em EXCEL (.xlsx) — um layout por banco
+# ─────────────────────────────────────────────────────────────────────────────
+# Diferente do OFX (padronizado), cada banco exporta o Excel do seu jeito. Cada
+# leitor devolve a MESMA lista de movimentos (data/valor/tipo/historico/
+# contraparte/cnpj/documento/linha_hash) que os parsers de OFX/CSV — então a tela
+# de Importar Extrato trata tudo igual. `detectar_banco_xlsx` reconhece o layout
+# sozinho pra a Elaine não precisar escolher o banco.
+
+def _norm_xls(s: Any) -> str:
+    return (unicodedata.normalize("NFKD", str("" if s is None else s))
+            .encode("ASCII", "ignore").decode().strip().lower())
+
+
+def _xls_data(v: Any) -> date | None:
+    """Aceita célula de data como Timestamp do Excel OU texto 'DD/MM/AAAA[ HH:MM]'."""
+    import pandas as pd
+    if v is None or (not isinstance(v, str) and pd.isna(v)):
+        return None
+    if hasattr(v, "year") and hasattr(v, "month") and hasattr(v, "day"):
+        try:
+            return date(v.year, v.month, v.day)
+        except Exception:
+            pass
+    m = re.match(r"(\d{2})/(\d{2})/(\d{4})", str(v).strip())
+    return date(int(m.group(3)), int(m.group(2)), int(m.group(1))) if m else None
+
+
+def _num_br(v: Any) -> float | None:
+    """'1.234,56' -> 1234.56 (robusto a valor já numérico vindo do Excel)."""
+    import pandas as pd
+    if v is None or (not isinstance(v, str) and pd.isna(v)):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().replace("R$", "").replace(" ", "").replace(".", "").replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _bb_valor(v: Any) -> float | None:
+    """BB: '1.234,56 C' -> +1234.56 · '-3.608,85 D' -> -3608.85 (sufixo C/D manda)."""
+    import pandas as pd
+    if v is None or (not isinstance(v, str) and pd.isna(v)):
+        return None
+    s = str(v).strip()
+    neg = s.endswith("D") or s.startswith("-")
+    s = re.sub(r"[CD]\s*$", "", s).replace("R$", "").strip().replace(".", "").replace(",", ".")
+    try:
+        val = abs(float(s))
+    except ValueError:
+        return None
+    return -val if neg else val
+
+
+def _mov_xls(data, valor_assinado, historico, contraparte, cnpj, documento) -> dict:
+    d = {
+        "data": data,
+        "valor": round(abs(valor_assinado), 2),
+        "tipo": "saida" if valor_assinado < 0 else "entrada",
+        "historico": historico,
+        "contraparte": contraparte or None,
+        "cnpj_contraparte": cnpj,
+        "documento": documento or None,
+        "saldo_apos": None,
+    }
+    d["linha_hash"] = _hash_mov(d)
+    return d
+
+
+def _achar_header_xls(file_bytes: bytes, *chaves: str) -> int | None:
+    """Índice da linha de cabeçalho = a 1ª que contém TODAS as `chaves` (robusto às
+    linhas de metadados que variam por banco: Itaú tem 9 no topo, Santander tem a
+    linha AGENCIA, etc.)."""
+    import pandas as pd
+    raw = pd.read_excel(io.BytesIO(file_bytes), header=None, nrows=30)
+    for i in range(len(raw)):
+        cels = [_norm_xls(x) for x in raw.iloc[i].tolist()]
+        if all(any(k in c for c in cels) for k in chaves):
+            return i
+    return None
+
+
+def _col(df, *chaves: str):
+    for c in df.columns:
+        n = _norm_xls(c)
+        if any(k in n for k in chaves):
+            return c
+    return None
+
+
+def _ler_por_nome(file_bytes: bytes, *chaves_header: str):
+    """Acha o cabeçalho por palavra-chave e devolve o DataFrame já com colunas nomeadas."""
+    import pandas as pd
+    hi = _achar_header_xls(file_bytes, *chaves_header)
+    if hi is None:
+        return None
+    return pd.read_excel(io.BytesIO(file_bytes), header=hi)
+
+
+def parse_bb_xlsx(file_bytes: bytes) -> list[dict[str, Any]]:
+    """BB 'Extrato conta corrente': Data | Lançamento | Detalhes | Nº doc | Valor | Tipo."""
+    df = _ler_por_nome(file_bytes, "lancamento", "detalhe")
+    if df is None:
+        return []
+    c_data, c_lanc = _col(df, "data"), _col(df, "lancamento")
+    c_det, c_doc = _col(df, "detalhe"), _col(df, "documento")
+    c_val, c_tipo = _col(df, "valor"), _col(df, "tipo lancamento", "tipo")
+    movs = []
+    for _, row in df.iterrows():
+        data, valor = _xls_data(row.get(c_data)), _bb_valor(row.get(c_val))
+        lanc = re.sub(r"\s+", " ", str(row.get(c_lanc)).strip())
+        if data is None or valor is None or _norm_xls(lanc).startswith("saldo") \
+                or _norm_xls(lanc) == "s a l d o":
+            continue
+        # sinal de reforço: se o Valor não trouxe sinal, respeita a coluna Tipo (D=débito)
+        if valor > 0 and c_tipo and _norm_xls(row.get(c_tipo)).startswith("d"):
+            valor = -valor
+        det = row.get(c_det)
+        detalhes = "" if det is None or (isinstance(det, float)) else re.sub(r"\s+", " ", str(det).strip())
+        doc = re.sub(r"\s+", "", str(row.get(c_doc)).strip()) if c_doc else ""
+        doc = None if doc.lower() in ("", "0", "nan") else doc
+        cnpj_m = _RE_CNPJ.search(detalhes) or _RE_CPF.search(detalhes)
+        cp = _limpar_contraparte(detalhes) if detalhes else ""
+        historico = (f"{lanc} {cp}".strip() if cp else lanc).title()
+        movs.append(_mov_xls(
+            data, valor, historico,
+            (cp.title() if cp and not cp.isdigit() else (cp or None)),
+            _so_digitos(cnpj_m.group(1)) if cnpj_m else None, doc))
+    return movs
+
+
+_SANT_PREFIXOS = [
+    "RESGATE CONTAMAX AUTOMATICO", "APLICACAO CONTAMAX", "DEBITO EMPRESTIMO",
+    "RENDIMENTO LIQUIDO DE CONTAMAX", "TARIFA PIX RECEBIDO QR CHECKOUT",
+    "TARIFA AVULSA ENVIO PIX", "PRESTACAO CONSORCIO", "PIX RECEBIDO", "PIX ENVIADO",
+]
+
+
+def parse_santander_xlsx(file_bytes: bytes) -> list[dict[str, Any]]:
+    """Santander: Data | Histórico | Documento | Valor | Saldo (valor com sinal)."""
+    df = _ler_por_nome(file_bytes, "historico", "valor")
+    if df is None:
+        return []
+    c_data, c_hist = _col(df, "data"), _col(df, "historico")
+    c_doc, c_val = _col(df, "documento"), _col(df, "valor")
+    movs = []
+    for _, row in df.iterrows():
+        data, valor = _xls_data(row.get(c_data)), _num_br(row.get(c_val))
+        if data is None or valor is None or _norm_xls(row.get(c_hist)).startswith("saldo"):
+            continue
+        hist_up = re.sub(r"\s+", " ", str(row.get(c_hist)).strip()).upper()
+        doc = re.sub(r"\s+", "", str(row.get(c_doc)).strip()) if c_doc else ""
+        doc = None if doc in ("", "0", "000000", "nan", "NAN") else doc
+        cp = hist_up
+        for pre in _SANT_PREFIXOS:
+            if hist_up.startswith(pre):
+                cp = hist_up[len(pre):].strip() or None
+                break
+        cnpj_m = _RE_CNPJ.search(hist_up) or _RE_CPF.search(hist_up)
+        movs.append(_mov_xls(
+            data, valor, hist_up.title(),
+            (cp.title() if cp and not cp.isdigit() else cp),
+            _so_digitos(cnpj_m.group(1)) if cnpj_m else None, doc))
+    return movs
+
+
+def parse_itau_xlsx(file_bytes: bytes) -> list[dict[str, Any]]:
+    """Itaú: Data | Lançamento | Ag/origem | Razão Social | CPF/CNPJ | Valor | Saldo.
+    O Itaú entrega o nome (Razão Social) e o CPF/CNPJ em colunas próprias — melhor que
+    garimpar do histórico; cai pro histórico quando vierem vazios (ex.: tarifas)."""
+    df = _ler_por_nome(file_bytes, "razao social", "valor")
+    if df is None:
+        return []
+    c_data, c_lanc = _col(df, "data"), _col(df, "lancamento", "historico")
+    c_rs, c_cnpj = _col(df, "razao social"), _col(df, "cpf", "cnpj")
+    c_val = _col(df, "valor")
+    movs = []
+    for _, row in df.iterrows():
+        data, valor = _xls_data(row.get(c_data)), _num_br(row.get(c_val))
+        lanc = re.sub(r"\s+", " ", str(row.get(c_lanc)).strip())
+        if data is None or valor is None or _norm_xls(lanc).startswith("saldo"):
+            continue
+        rs = row.get(c_rs) if c_rs else None
+        rs = re.sub(r"\s+", " ", str(rs).strip()) if rs is not None and str(rs).strip().lower() != "nan" else ""
+        cnpj_raw = _so_digitos(str(row.get(c_cnpj))) if c_cnpj and row.get(c_cnpj) is not None else ""
+        if not cnpj_raw:
+            m = _RE_CNPJ.search(lanc) or _RE_CPF.search(lanc)
+            cnpj_raw = _so_digitos(m.group(1)) if m else None
+        cp = rs or _limpar_contraparte(lanc)
+        historico = (f"{lanc} {rs}".strip() if rs else lanc).title()
+        movs.append(_mov_xls(data, valor, historico,
+                             (cp.title() if cp and not str(cp).isdigit() else (cp or None)),
+                             cnpj_raw or None, None))
+    return movs
+
+
+def parse_asaas_xlsx(file_bytes: bytes) -> list[dict[str, Any]]:
+    """Asaas: acha o cabeçalho (Data+Valor) sozinho; Valor com sinal; &amp; -> &."""
+    import pandas as pd
+    df = _ler_por_nome(file_bytes, "data", "valor")
+    if df is None:
+        return []
+    df = df.dropna(how="all")
+    c_data, c_val = _col(df, "data"), _col(df, "valor")
+    c_desc, c_doc = _col(df, "descricao"), _col(df, "transacao")
+    movs = []
+    for _, row in df.iterrows():
+        data, valor = _xls_data(row.get(c_data)), row.get(c_val)
+        if data is None or pd.isna(valor) or float(valor) == 0:
+            continue
+        desc = re.sub(r"\s+", " ", html.unescape(str(row.get(c_desc) or "")).strip())
+        if desc.lower().startswith("saldo"):
+            continue
+        v = float(valor)
+        cnpj_m = _RE_CNPJ.search(desc) or _RE_CPF.search(desc)
+        doc = row.get(c_doc) if c_doc else None
+        doc = str(int(doc)) if pd.notna(doc) and str(doc) != "" else None
+        movs.append(_mov_xls(data, v, desc, _limpar_contraparte(desc) or None,
+                             _so_digitos(cnpj_m.group(1)) if cnpj_m else None, doc))
+    return movs
+
+
+_LEITORES_XLSX = {
+    "Banco do Brasil": parse_bb_xlsx,
+    "Santander": parse_santander_xlsx,
+    "Itaú": parse_itau_xlsx,
+    "Asaas": parse_asaas_xlsx,
+}
+
+
+def detectar_banco_xlsx(file_bytes: bytes) -> str | None:
+    """Reconhece o banco pelo cabeçalho do Excel. None = layout não suportado ainda."""
+    import pandas as pd
+    raw = pd.read_excel(io.BytesIO(file_bytes), header=None, nrows=30)
+    blob = " | ".join(_norm_xls(x) for row in raw.values.tolist() for x in row)
+    if "tipo de transacao" in blob or ("transacao" in blob and "saldo inicial" in blob):
+        return "Asaas"
+    if "razao social" in blob and ("cpf/cnpj" in blob or "cpf" in blob or "cnpj" in blob):
+        return "Itaú"
+    if "tipo lancamento" in blob or ("lancamento" in blob and "detalhe" in blob):
+        return "Banco do Brasil"
+    if "historico" in blob and "saldo" in blob:
+        return "Santander"
+    return None
+
+
+def parse_extrato_xlsx(file_bytes: bytes) -> tuple[str, list[dict[str, Any]]]:
+    """Detecta o banco e devolve (banco, movimentos). Erra claro se não reconhecer."""
+    banco = detectar_banco_xlsx(file_bytes)
+    if banco is None:
+        raise ValueError(
+            "Não reconheci de qual banco é esse Excel. Já leio: "
+            + ", ".join(_LEITORES_XLSX) + ". (Safra em Excel ainda não — "
+            "me manda o arquivo que eu ensino.)")
+    return banco, _LEITORES_XLSX[banco](file_bytes)
+
+
 def parse_extrato(file_bytes: bytes, nome_arquivo: str) -> list[dict[str, Any]]:
     ext = nome_arquivo.lower().rsplit(".", 1)[-1] if "." in nome_arquivo else ""
     if ext == "csv" or ext == "txt":
         return parse_csv(file_bytes)
     if ext in ("ofx", "qfx"):
         return parse_ofx(file_bytes)
+    if ext in ("xlsx", "xls"):
+        return parse_extrato_xlsx(file_bytes)[1]
     raise ValueError(
-        f"Formato '.{ext}' ainda não suportado. Use CSV ou OFX "
-        "(o PDF entra na próxima rodada)."
+        f"Formato '.{ext}' ainda não suportado. Use CSV, OFX ou Excel "
+        "(BB / Santander / Asaas)."
     )

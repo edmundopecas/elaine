@@ -24,6 +24,7 @@ painel = st.Page("views/apresentacao.py", title="Painel de Saídas", icon="📊"
 painel_ent = st.Page("views/painel_entradas.py", title="Painel de Entradas", icon="📈")
 analise_fat = st.Page("views/faturamento.py", title="Análise do Faturamento", icon="🔎")
 comparativo = st.Page("views/comparativo.py", title="Comparativo", icon="⚖️")
+conferencia = st.Page("views/conferencia.py", title="Conferência Contas a Pagar", icon="🔗")
 emprestimos = st.Page("views/emprestimos.py", title="Empréstimos", icon="🏦")
 transfer = st.Page("views/transferencias.py", title="Transferências entre Contas", icon="🔄")
 contas = st.Page("views/contas.py", title="Contas Bancárias", icon="🏦")
@@ -33,7 +34,7 @@ base = st.Page("views/base_tipos.py", title="Base de Tipos", icon="📒")
 # a de baixo é o operacional do dia a dia. Saídas segue como página default.
 pg = st.navigation({
     "⭐ Para a Diretoria": [diretoria, comparativo],
-    "Operação": [saidas, entradas, pendencias, importar, boletos, painel,
-                 painel_ent, analise_fat, emprestimos, transfer, contas, base],
+    "Operação": [saidas, entradas, pendencias, importar, boletos, conferencia,
+                 painel, painel_ent, analise_fat, emprestimos, transfer, contas, base],
 })
 pg.run()

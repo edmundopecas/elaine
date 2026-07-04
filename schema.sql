@@ -105,9 +105,12 @@ CREATE INDEX IF NOT EXISTS idx_lanc_data    ON lancamentos(data);
 CREATE INDEX IF NOT EXISTS idx_lanc_empresa ON lancamentos(empresa_id);
 
 -- Títulos = contas a PAGAR / RECEBER (o PREVISTO) ----------------------------
+-- Também é o destino do relatório "A Pagar Geral" (Argos): cada título é uma
+-- conta a pagar prevista; a baixa (lancamento_id) é o VÍNCULO com o pagamento
+-- realizado no extrato — é isso que a tela de Conferência preenche.
 CREATE TABLE IF NOT EXISTS titulos (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    empresa_id      INTEGER NOT NULL REFERENCES empresas(id),
+    empresa_id      INTEGER REFERENCES empresas(id),  -- NULL p/ Braga (fora do app)
     tipo            TEXT NOT NULL,            -- 'pagar' | 'receber'
     descricao       TEXT NOT NULL,
     contraparte     TEXT,                     -- fornecedor / cliente
@@ -118,7 +121,14 @@ CREATE TABLE IF NOT EXISTS titulos (
     status          TEXT NOT NULL DEFAULT 'aberto',  -- 'aberto'|'pago'|'recebido'|'cancelado'
     data_baixa      TEXT,
     lancamento_id   INTEGER REFERENCES lancamentos(id),  -- baixa = liga ao extrato
+    documento       TEXT,                     -- nº do documento no Argos
+    tipo_docto      TEXT,                     -- MERCADORIA, TRIBUTOS, PESSOAL...
+    loja            TEXT,                     -- loja do Argos (razão social)
+    origem          TEXT DEFAULT 'manual',    -- 'argos' quando vem da A Pagar Geral
+    linha_hash      TEXT,                     -- dedup em reimport
     criado_em       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_titulos_venc    ON titulos(vencimento);
 CREATE INDEX IF NOT EXISTS idx_titulos_empresa ON titulos(empresa_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_titulos_hash
+    ON titulos(linha_hash) WHERE linha_hash IS NOT NULL;

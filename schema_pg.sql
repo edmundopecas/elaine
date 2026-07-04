@@ -125,3 +125,15 @@ CREATE TABLE IF NOT EXISTS titulos (
 );
 CREATE INDEX IF NOT EXISTS idx_titulos_venc    ON titulos(vencimento);
 CREATE INDEX IF NOT EXISTS idx_titulos_empresa ON titulos(empresa_id);
+
+-- Conferência "A Pagar Geral" (Argos) × pagamentos do extrato -----------------
+-- Reaproveita `titulos` como o PREVISTO; a baixa (lancamento_id) é o VÍNCULO com
+-- o pagamento realizado. Colunas extras vindas do relatório do Argos.
+ALTER TABLE titulos ALTER COLUMN empresa_id DROP NOT NULL;  -- Braga não é empresa do app
+ALTER TABLE titulos ADD COLUMN IF NOT EXISTS documento  TEXT;
+ALTER TABLE titulos ADD COLUMN IF NOT EXISTS tipo_docto TEXT;   -- MERCADORIA, TRIBUTOS, PESSOAL...
+ALTER TABLE titulos ADD COLUMN IF NOT EXISTS loja       TEXT;   -- loja do Argos (razão)
+ALTER TABLE titulos ADD COLUMN IF NOT EXISTS origem     TEXT DEFAULT 'manual';  -- 'argos'
+ALTER TABLE titulos ADD COLUMN IF NOT EXISTS linha_hash TEXT;   -- dedup em reimport
+CREATE UNIQUE INDEX IF NOT EXISTS idx_titulos_hash
+    ON titulos(linha_hash) WHERE linha_hash IS NOT NULL;

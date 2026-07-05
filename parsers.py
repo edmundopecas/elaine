@@ -675,6 +675,51 @@ def detectar_banco_xlsx(file_bytes: bytes) -> str | None:
     return None
 
 
+def conta_do_arquivo(file_bytes: bytes, banco: str | None) -> str | None:
+    """Pesca o número da conta que vem DENTRO do arquivo (no topo), pra travar
+    upload na conta errada. Devolve só os dígitos, ou None quando o export não
+    traz a conta (BB e Santander no formato sem cabeçalho de agência)."""
+    import pandas as pd
+    try:
+        if banco == "Safra" or _eh_html_disfarcado(file_bytes):
+            for t in pd.read_html(io.BytesIO(file_bytes))[:4]:
+                blob = " ".join(str(x) for x in t.values.ravel() if str(x) != "nan")
+                m = re.search(r"[Cc]onta\D{0,4}(\d[\d.\-]{5,})", blob)
+                if m:
+                    return re.sub(r"\D", "", m.group(1))
+            return None
+        raw = pd.read_excel(io.BytesIO(file_bytes), header=None, nrows=10)
+    except Exception:
+        return None
+    for i in range(len(raw)):
+        cels = [str(x) for x in raw.iloc[i].tolist()]
+        for j, c in enumerate(cels):
+            if _norm_xls(c).startswith("conta"):
+                m = re.search(r"(\d[\d.\-]{5,})", c)          # conta no mesmo campo
+                if m:
+                    return re.sub(r"\D", "", m.group(1))
+                if j + 1 < len(cels):                          # ou no campo seguinte
+                    m = re.search(r"(\d[\d.\-]{5,})", cels[j + 1])
+                    if m:
+                        return re.sub(r"\D", "", m.group(1))
+    return None
+
+
+def contas_conferem(conta_arquivo: str | None, conta_descricao: str) -> bool | None:
+    """True/False se a conta do arquivo bate com a da conta escolhida; None quando não
+    dá pra saber (arquivo não traz a conta). Compara pelo sufixo de dígitos, tolerando
+    formatos diferentes (ag+conta, zeros à esquerda, dígito verificador)."""
+    if not conta_arquivo:
+        return None
+    b = re.sub(r"\D", "", conta_descricao or "")
+    a = conta_arquivo.lstrip("0")
+    b = b.lstrip("0")
+    if not a or not b:
+        return None
+    curto, longo = (a, b) if len(a) <= len(b) else (b, a)
+    return curto[-5:] in longo
+
+
 def parse_extrato_xlsx(file_bytes: bytes) -> tuple[str, list[dict[str, Any]]]:
     """Detecta o banco e devolve (banco, movimentos). Erra claro se não reconhecer."""
     if _eh_html_disfarcado(file_bytes):
@@ -686,10 +731,22 @@ def parse_extrato_xlsx(file_bytes: bytes) -> tuple[str, list[dict[str, Any]]]:
             "o do Safra. Me manda o arquivo que eu ensino.")
     banco = detectar_banco_xlsx(file_bytes)
     if banco is None:
+        # Pista quando NÃO é extrato: A Pagar Geral (fornecedor+vencimento) ou
+        # planilha de saídas — pra não deixar entrar lançamento errado por engano.
+        try:
+            import pandas as pd
+            topo = pd.read_excel(io.BytesIO(file_bytes), header=None, nrows=6)
+            blob = " ".join(_norm_xls(x) for row in topo.values.tolist() for x in row)
+        except Exception:
+            blob = ""
+        if "fornecedor" in blob and "vencimento" in blob:
+            raise ValueError(
+                "Isso parece a planilha de CONTAS A PAGAR (A Pagar Geral), não um "
+                "extrato bancário. Suba ela na tela 🔗 Conferência Contas a Pagar.")
         raise ValueError(
-            "Não reconheci de qual banco é esse Excel. Já leio: "
+            "Não reconheci esse arquivo como extrato bancário. Já leio: "
             + ", ".join(_LEITORES_XLSX) + " e Safra. "
-            "Me manda o arquivo que eu ensino o layout novo.")
+            "Confira se é o extrato certo — ou me manda o arquivo que eu ensino.")
     return banco, _LEITORES_XLSX[banco](file_bytes)
 
 

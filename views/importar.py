@@ -12,7 +12,8 @@ from classificador import (classificar_movimento, empresa_do_grupo_por_cnpj,
                            id_categoria_transferencia_interna, regras_ativas)
 from db import execute, query, query_one
 from dedup import planejar_insercao
-from parsers import detectar_banco_xlsx, hash_arquivo, parse_extrato
+from parsers import (conta_do_arquivo, contas_conferem, detectar_banco_xlsx,
+                     hash_arquivo, parse_extrato)
 
 # Históricos que são só dinheiro indo/voltando de conta rendimento (não é gasto):
 MECANICOS_APLICACAO = ("rende facil", "conta remunerada", "na conta corrente")
@@ -39,11 +40,13 @@ with col2:
     contas = query("SELECT id, banco, descricao FROM contas_bancarias "
                    "WHERE empresa_id=? AND ativa=1", (emp_id,))
     if contas:
-        rotulo = {f"{c['banco']} — {c['descricao'] or ''}".strip(" —"): c["id"] for c in contas}
+        rotulo = {f"{c['banco']} — {c['descricao'] or ''}".strip(" —"): c for c in contas}
         conta_sel = st.selectbox("Conta bancária", list(rotulo.keys()))
-        conta_id = rotulo[conta_sel]
+        conta = rotulo[conta_sel]
+        conta_id = conta["id"]
     else:
         st.warning("Empresa sem conta bancária cadastrada (opcional).")
+        conta = None
         conta_id = None
 
 arquivo = st.file_uploader("Arquivo do extrato (OFX, CSV ou Excel)",
@@ -65,6 +68,25 @@ if arquivo:
     if not movimentos:
         st.warning("Nenhum movimento encontrado no arquivo.")
         st.stop()
+
+    # ── Trava de CONTA TROCADA ───────────────────────────────────────────────
+    # Compara o número da conta que vem DENTRO do arquivo com a conta escolhida.
+    # Se não bater, bloqueia (a Elaine confirma explicitamente pra passar). Onde
+    # o arquivo não traz a conta (BB e Santander sem cabeçalho), só avisa.
+    if ext in ("xlsx", "xls") and conta is not None:
+        conta_arq = conta_do_arquivo(file_bytes, banco)
+        veredito = contas_conferem(conta_arq, conta["descricao"])
+        if veredito is False:
+            st.error(f"⛔ **Parece conta trocada.** Esse extrato é da conta "
+                     f"**…{conta_arq[-6:]}**, mas você escolheu **{conta['banco']} — "
+                     f"{conta['descricao']}**. Confira antes de gravar.")
+            if not st.checkbox("Confirmo: quero importar mesmo assim"):
+                st.stop()
+        elif veredito is True:
+            st.caption(f"✅ Conta confere com o arquivo (…{conta_arq[-6:]}).")
+        else:
+            st.caption("ℹ️ Não consegui confirmar a conta pelo arquivo — "
+                       "confira que escolheu a conta certa antes de gravar.")
 
     # ── Pré-classificação (preview, antes de gravar) ─────────────────────────
     #  1) transferência interna se o CNPJ da contraparte é de OUTRA empresa;
@@ -122,7 +144,10 @@ if arquivo:
     pendentes = sum(1 for m, _ in a_inserir if not m["_classificado"])
     st.success(f"**{len(movimentos)}** movimentos lidos · **{len(a_inserir)}** novos "
                f"({internas} transferências internas · {por_regra} por regras · "
-               f"{pendentes} ficarão pendentes) · **{duplicados}** já estavam no sistema.")
+               f"{pendentes} ficarão pendentes).")
+    if duplicados:
+        st.info(f"🔁 **{duplicados}** lançamento(s) já estavam no sistema e foram "
+                "ignorados — pode reimportar à vontade que **não duplica**.")
     if protegidos:
         st.caption(f"🛡️ {len(protegidos)} linha(s) de **boleto DDA somado** ignorada(s) — "
                    "esse(s) dia(s) já foi detalhado boleto a boleto (não vou dobrar).")

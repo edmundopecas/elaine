@@ -52,6 +52,7 @@ if IS_PG:
     import psycopg2.extras
 
     _conn = None
+    _SCHEMA_APLICADO = False   # o DDL do schema só roda 1x por processo
 
     def _pg():
         """Conexão única, reaberta se cair. search_path no schema 'elaine'."""
@@ -115,12 +116,27 @@ if IS_PG:
             raise
 
     def init_db() -> None:
-        """Cria o schema 'elaine' (idempotente) e semeia se vazio."""
-        schema = SCHEMA_PG_PATH.read_text(encoding="utf-8")
+        """Cria o schema 'elaine' (idempotente) e semeia se vazio.
+
+        Resiliente: a conexão é persistente (reusada entre reruns no Streamlit
+        Cloud). Se uma transação anterior quebrou, ela fica em estado 'aborted' e
+        TODA query seguinte dá InFailedSqlTransaction. Aqui: (1) rollback limpa
+        qualquer transação travada (auto-cura), e (2) o DDL roda em autocommit —
+        cada instrução confirma sozinha, então uma falha não prende a conexão."""
+        global _SCHEMA_APLICADO
         conn = _pg()
-        with conn.cursor() as cur:
-            cur.execute(schema)
-        conn.commit()
+        conn.rollback()                      # limpa transação pendente/quebrada
+        if not _SCHEMA_APLICADO:             # DDL só 1x por processo (não a cada rerun)
+            schema = SCHEMA_PG_PATH.read_text(encoding="utf-8")
+            prev_ac = conn.autocommit
+            conn.autocommit = True           # DDL não fica preso numa transação
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SET search_path TO elaine, public")
+                    cur.execute(schema)
+            finally:
+                conn.autocommit = prev_ac
+            _SCHEMA_APLICADO = True
         if not query("SELECT 1 FROM plano_contas LIMIT 1"):
             from seed import rodar_seed
             rodar_seed()

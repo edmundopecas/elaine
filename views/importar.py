@@ -6,10 +6,13 @@ from __future__ import annotations
 
 import unicodedata
 
+import pandas as pd
 import streamlit as st
 
-from classificador import (classificar_movimento, empresa_do_grupo_por_cnpj,
-                           id_categoria_transferencia_interna, regras_ativas)
+from classificador import (aprender_regra, classificar_movimento,
+                           empresa_do_grupo_por_cnpj,
+                           id_categoria_transferencia_interna,
+                           reclassificar_pendentes, regras_ativas)
 from db import execute, query, query_one
 from dedup import planejar_insercao
 from parsers import (conta_do_arquivo, contas_conferem, detectar_banco_xlsx,
@@ -17,6 +20,15 @@ from parsers import (conta_do_arquivo, contas_conferem, detectar_banco_xlsx,
 
 # Históricos que são só dinheiro indo/voltando de conta rendimento (não é gasto):
 MECANICOS_APLICACAO = ("rende facil", "conta remunerada", "na conta corrente")
+
+# Históricos genéricos demais pra virar regra (não aprender por eles):
+GENERICOS = {
+    "pagamento de boleto dda", "pagamento de boleto", "boleto",
+    "pix enviado", "pix enviado transf", "pix", "ted", "doc",
+    "transferencia", "saque", "deposito", "debito", "credito",
+}
+
+PENDENTE = "— pendente —"
 
 
 def _norm(s: str) -> str:
@@ -152,18 +164,41 @@ if arquivo:
         st.caption(f"🛡️ {len(protegidos)} linha(s) de **boleto DDA somado** ignorada(s) — "
                    "esse(s) dia(s) já foi detalhado boleto a boleto (não vou dobrar).")
 
-    st.dataframe(
-        [{"Data": m["data"], "Tipo": m["tipo"], "Valor": f"R$ {m['valor']:,.2f}",
-          "Contraparte": m.get("contraparte") or "—",
-          "Histórico": (m["historico"] or "")[:60],
-          "Categoria (auto)": m["_categoria"] or "— pendente —"}
-         for m, _ in a_inserir],
-        use_container_width=True, hide_index=True,
-    )
-
     if not a_inserir:
         st.info("Nada novo pra importar — esse período já está todo no sistema.")
         st.stop()
+
+    # ── Preview EDITÁVEL: dá pra corrigir a categoria antes de gravar ────────
+    cats_ativas = query("SELECT id, nome FROM plano_contas WHERE ativo=1 "
+                        "ORDER BY tipo, ordem")
+    nome_para_pid = {c["nome"]: c["id"] for c in cats_ativas}
+    auto_cats = [(planos.get(m["_plano_id"]) or PENDENTE) for m, _ in a_inserir]
+    opcoes = [PENDENTE] + list(dict.fromkeys(
+        [c["nome"] for c in cats_ativas] + [a for a in auto_cats if a != PENDENTE]))
+
+    st.caption("✏️ Pode **corrigir a coluna Categoria** antes de gravar. Quando você "
+               "muda uma, o sistema **aprende** e acerta as próximas iguais sozinho.")
+    prev_df = pd.DataFrame({
+        "Data": [m["data"] for m, _ in a_inserir],
+        "Tipo": [m["tipo"] for m, _ in a_inserir],
+        "Valor": [m["valor"] for m, _ in a_inserir],
+        "Contraparte": [m.get("contraparte") or "—" for m, _ in a_inserir],
+        "Histórico": [(m["historico"] or "")[:60] for m, _ in a_inserir],
+        "Categoria": auto_cats,
+    })
+    edited = st.data_editor(
+        prev_df, hide_index=True, use_container_width=True, key="imp_editor",
+        column_config={
+            "Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY", disabled=True),
+            "Tipo": st.column_config.TextColumn(disabled=True, width="small"),
+            "Valor": st.column_config.NumberColumn(format="R$ %.2f", disabled=True),
+            "Contraparte": st.column_config.TextColumn(disabled=True),
+            "Histórico": st.column_config.TextColumn(disabled=True),
+            "Categoria": st.column_config.SelectboxColumn(
+                "Categoria", options=opcoes, width="medium",
+                help="Troque se a automática estiver errada — o sistema aprende."),
+        },
+    )
 
     if st.button("✅ Confirmar importação", type="primary"):
         arq_hash = hash_arquivo(file_bytes)
@@ -173,7 +208,13 @@ if arquivo:
             (emp_id, conta_id, arquivo.name, arq_hash, ext, len(movimentos)),
         )
         origem = "extrato"  # formato (xlsx/ofx/csv) fica em importacoes.formato
-        for m, lh in a_inserir:
+        aprendidos = 0
+        for i, (m, lh) in enumerate(a_inserir):
+            escolhida = str(edited.iloc[i]["Categoria"])
+            pid = nome_para_pid.get(escolhida)          # None = pendente
+            mudou = escolhida != auto_cats[i]           # correção manual?
+            regra_id = None if mudou else (m["_regra"]["id"] if m["_regra"] else None)
+            centro = None if mudou else m["_centro_id"]
             execute(
                 "INSERT INTO lancamentos (empresa_id, conta_bancaria_id, data, descricao, "
                 "contraparte, cnpj_contraparte, documento, valor, tipo, plano_conta_id, "
@@ -181,16 +222,27 @@ if arquivo:
                 "linha_hash, saldo_apos) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (emp_id, conta_id, m["data"].isoformat(), m["historico"],
                  m.get("contraparte"), m.get("cnpj_contraparte"), m["documento"],
-                 m["valor"], m["tipo"], m["_plano_id"], m["_centro_id"],
-                 1 if m["_classificado"] else 0, origem,
-                 m["_regra"]["id"] if m["_regra"] else None, imp_id,
-                 lh, m["saldo_apos"]),
+                 m["valor"], m["tipo"], pid, centro,
+                 1 if pid else 0, origem, regra_id, imp_id, lh, m["saldo_apos"]),
             )
-            if m["_regra"]:
+            if not mudou and m["_regra"]:
                 execute("UPDATE regras_classificacao SET vezes_aplicada=vezes_aplicada+1 "
                         "WHERE id=?", (m["_regra"]["id"],))
+            # Aprende quando você corrige (chave = contraparte, ou histórico não-genérico)
+            if mudou and pid:
+                chave = (m.get("contraparte") or "").strip()
+                if not chave and (m["historico"] or "").strip().lower() not in GENERICOS:
+                    chave = (m["historico"] or "").strip()
+                if chave and chave.lower() not in GENERICOS:
+                    aprender_regra(chave, pid, m["tipo"])
+                    aprendidos += 1
 
         execute("UPDATE importacoes SET linhas_importadas=?, linhas_duplicadas=? WHERE id=?",
                 (len(a_inserir), duplicados, imp_id))
-        st.success(f"Importado! {len(a_inserir)} novos · {duplicados} duplicados (ignorados).")
+        auto = reclassificar_pendentes() if aprendidos else 0
+        msg = f"Importado! {len(a_inserir)} novos · {duplicados} duplicados (ignorados)."
+        if aprendidos:
+            msg += f" Aprendi {aprendidos} categoria(s)" + (
+                f" e reclassifiquei {auto} pendente(s)." if auto else ".")
+        st.success(msg)
         st.rerun()

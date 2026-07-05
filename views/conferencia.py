@@ -213,6 +213,69 @@ k[3].metric("↔️ Diferença acumulada", brl(tot_dif),
             help="Soma de (pago − previsto) dos conferidos. Negativo = desconto; "
                  "positivo = juros/multa.")
 
+# ─── CONCILIAÇÃO POR CATEGORIA (o jeito simples: total × total) ───────────────
+# Não casa título-a-título (impossível na folha, que o CPR lança em bloco e o banco
+# paga espalhado/em dinheiro). Compara, por categoria: o previsto no CPR × o que de
+# fato saiu das contas (SÓ despesa real — fora aplicação, resgate, transferência,
+# pró-labore). A diferença mostra o que faltou pagar (ou foi pago em dinheiro).
+def _bucket(texto: str) -> str:
+    n = _norm(texto or "")
+    if any(k in n for k in ("mercadoria", "cmv", "frete", "dacte")):
+        return "Mercadoria"
+    if any(k in n for k in ("pessoal", "pagamentos fun", "folha", "salario", "ferias",
+                            "mao de obra", "13", "rescis", "pensao", "adiantament")):
+        return "Folha e Pessoal"
+    if any(k in n for k in ("energia", "agua")):
+        return "Energia e Água"
+    if any(k in n for k in ("constru", "obra", "reforma")):
+        return "Construção"
+    if any(k in n for k in ("icms", "tributo", "imposto", "gnre", "fecoep", "pis",
+                            "cofins", "fgts", "gps", "inss")):
+        return "Tributos"
+    return "Outros / Administrativo"
+
+
+prev_bucket: dict = {}
+for t in titulos_db:
+    b = _bucket(t["tipo_docto"] or "")
+    prev_bucket[b] = prev_bucket.get(b, 0) + t["valor"]
+
+cond_pg = ["l.tipo='saida'", "l.data BETWEEN ? AND ?", "p.entra_dre=1"]
+par_pg = [d_ini.isoformat(), d_fim.isoformat()]
+if sel_emp != "Todas":
+    cond_pg.append("l.empresa_id=?"); par_pg.append(emp_por_apelido[sel_emp])
+pago_rows = query(f"SELECT p.nome, SUM(l.valor) tot FROM lancamentos l "
+                  f"JOIN plano_contas p ON p.id=l.plano_conta_id "
+                  f"WHERE {' AND '.join(cond_pg)} GROUP BY p.nome", tuple(par_pg))
+pago_bucket: dict = {}
+for r in pago_rows:
+    b = _bucket(r["nome"])
+    pago_bucket[b] = pago_bucket.get(b, 0) + r["tot"]
+
+st.divider()
+st.subheader("📊 Conciliação por categoria")
+st.caption("O jeito simples: **quanto o CPR previa × quanto saiu das contas** (só "
+           "despesa real — **fora aplicação, transferência e pró-labore**). A folha "
+           "não casa 1-a-1 (o CPR lança em bloco, o banco paga espalhado e parte em "
+           "dinheiro) — aqui você compara o **total** e a **diferença** mostra o que "
+           "faltou (ou foi pago em dinheiro).")
+buckets = sorted(set(prev_bucket) | set(pago_bucket),
+                 key=lambda b: -(prev_bucket.get(b, 0) + pago_bucket.get(b, 0)))
+conc = pd.DataFrame([{
+    "Categoria": b, "Previsto (CPR)": round(prev_bucket.get(b, 0), 2),
+    "Pago pelas contas": round(pago_bucket.get(b, 0), 2),
+    "Diferença (pago − previsto)": round(pago_bucket.get(b, 0) - prev_bucket.get(b, 0), 2),
+} for b in buckets])
+st.dataframe(conc, hide_index=True, use_container_width=True, column_config={
+    "Previsto (CPR)": st.column_config.NumberColumn(format="R$ %.2f"),
+    "Pago pelas contas": st.column_config.NumberColumn(format="R$ %.2f"),
+    "Diferença (pago − previsto)": st.column_config.NumberColumn(format="R$ %.2f")})
+t_prev, t_pago = sum(prev_bucket.values()), sum(pago_bucket.values())
+st.caption(f"**Total** — Previsto no CPR: **{brl(t_prev)}** · Pago pelas contas (despesa "
+           f"real): **{brl(t_pago)}** · Diferença: **{brl(t_pago - t_prev)}**. "
+           "Diferença negativa = faltou pagar ou foi em dinheiro; positiva = pagou algo "
+           "fora do CPR (ex.: tributo, aluguel).")
+
 # ─── Exportar Excel pra diretoria (.xlsx de verdade — abre certo no Excel) ────
 def _montar_excel_diretoria() -> bytes:
     sem = res["saidas_sem_titulo"]
@@ -233,6 +296,7 @@ def _montar_excel_diretoria() -> bytes:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xl:
         resumo.to_excel(xl, sheet_name="Resumo", index=False)
+        conc.to_excel(xl, sheet_name="Conciliação por categoria", index=False)
         if sem:
             (semdf.groupby("Categoria", as_index=False)["Valor"].sum()
              .sort_values("Valor", ascending=False)
@@ -250,54 +314,54 @@ st.download_button(
     help="Abre certinho no Excel (abas: Resumo, Conferência, Saídas sem título).")
 
 st.divider()
-st.caption("🟢 forte (valor+nome) · 🟡 valor bate, nome fraco (confira) · "
-           "🔴 sem pagamento. Ajuste a coluna **Pagamento** e salve.")
+# ─── 4) Detalhe título-a-título (OPCIONAL) — bom pra bater a mercadoria ───────
+with st.expander("🔎 Detalhe: conferir título por título (opcional — útil pra bater "
+                 "a mercadoria; a folha não casa 1-a-1)"):
+    st.caption("🟢 forte (valor+nome) · 🟡 valor bate, nome fraco (confira) · "
+               "🔴 sem pagamento. Ajuste a coluna **Pagamento** e salve.")
+    editado = st.data_editor(
+        df, hide_index=True, use_container_width=True, key="conf_editor",
+        column_config={
+            "_tid": None,
+            "Status": st.column_config.TextColumn(disabled=True, width="small"),
+            "Fornecedor": st.column_config.TextColumn(disabled=True),
+            "Vencimento": st.column_config.TextColumn(disabled=True, width="small"),
+            "Tipo": st.column_config.TextColumn(disabled=True, width="small"),
+            "Previsto": st.column_config.NumberColumn(format="R$ %.2f", disabled=True),
+            "Pagamento": st.column_config.SelectboxColumn(
+                options=opcoes, width="large",
+                help="Escolha o pagamento do extrato que quitou este título."),
+            "Δ (pago-prev)": st.column_config.NumberColumn(format="R$ %.2f", disabled=True),
+        },
+    )
 
-# ─── 4) Editor: confirmar / vincular ─────────────────────────────────────────
-editado = st.data_editor(
-    df, hide_index=True, use_container_width=True, key="conf_editor",
-    column_config={
-        "_tid": None,
-        "Status": st.column_config.TextColumn(disabled=True, width="small"),
-        "Fornecedor": st.column_config.TextColumn(disabled=True),
-        "Vencimento": st.column_config.TextColumn(disabled=True, width="small"),
-        "Tipo": st.column_config.TextColumn(disabled=True, width="small"),
-        "Previsto": st.column_config.NumberColumn(format="R$ %.2f", disabled=True),
-        "Pagamento": st.column_config.SelectboxColumn(
-            options=opcoes, width="large",
-            help="Escolha o pagamento do extrato que quitou este título."),
-        "Δ (pago-prev)": st.column_config.NumberColumn(format="R$ %.2f", disabled=True),
-    },
-)
-
-if st.button("💾 Salvar vínculos", type="primary"):
-    novos_vinc = {}   # tid -> saida_id (ou None)
-    for _, r in editado.iterrows():
-        novos_vinc[r["_tid"]] = id_por_rotulo.get(r["Pagamento"])
-    # detecta a mesma saída em dois títulos
-    usados = [sid for sid in novos_vinc.values() if sid]
-    dups = {x for x in usados if usados.count(x) > 1}
-    if dups:
-        st.error("O mesmo pagamento está ligado a mais de um título "
-                 f"({len(dups)} caso(s)). Cada pagamento só pode quitar um título.")
-        st.stop()
-    n_lig = n_desl = 0
-    atual = {t["id"]: t["lancamento_id"] for t in titulos_db}
-    for tid, sid in novos_vinc.items():
-        if sid == atual.get(tid):
-            continue
-        if sid:
-            s = sd_por_id[sid]
-            execute("UPDATE titulos SET lancamento_id=?, status='pago', data_baixa=? WHERE id=?",
-                    (sid, s["data"], tid))
-            n_lig += 1
-        else:
-            execute("UPDATE titulos SET lancamento_id=NULL, status='aberto', "
-                    "data_baixa=NULL WHERE id=?", (tid,))
-            n_desl += 1
-    st.success(f"Salvo! {n_lig} vínculo(s) novo(s)"
-               + (f" · {n_desl} desfeito(s)" if n_desl else "") + ".")
-    st.rerun()
+    if st.button("💾 Salvar vínculos", type="primary"):
+        novos_vinc = {}   # tid -> saida_id (ou None)
+        for _, r in editado.iterrows():
+            novos_vinc[r["_tid"]] = id_por_rotulo.get(r["Pagamento"])
+        usados = [sid for sid in novos_vinc.values() if sid]
+        dups = {x for x in usados if usados.count(x) > 1}
+        if dups:
+            st.error("O mesmo pagamento está ligado a mais de um título "
+                     f"({len(dups)} caso(s)). Cada pagamento só pode quitar um título.")
+            st.stop()
+        n_lig = n_desl = 0
+        atual = {t["id"]: t["lancamento_id"] for t in titulos_db}
+        for tid, sid in novos_vinc.items():
+            if sid == atual.get(tid):
+                continue
+            if sid:
+                s = sd_por_id[sid]
+                execute("UPDATE titulos SET lancamento_id=?, status='pago', data_baixa=? "
+                        "WHERE id=?", (sid, s["data"], tid))
+                n_lig += 1
+            else:
+                execute("UPDATE titulos SET lancamento_id=NULL, status='aberto', "
+                        "data_baixa=NULL WHERE id=?", (tid,))
+                n_desl += 1
+        st.success(f"Salvo! {n_lig} vínculo(s) novo(s)"
+                   + (f" · {n_desl} desfeito(s)" if n_desl else "") + ".")
+        st.rerun()
 
 # ─── Saídas sem título (pagou e não estava previsto) ─────────────────────────
 st.divider()

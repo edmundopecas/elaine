@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import io
+
 import pandas as pd
 import streamlit as st
 
@@ -178,6 +180,42 @@ k[2].metric("🔴 Previsto e não pago", brl(tot_naopago))
 k[3].metric("↔️ Diferença acumulada", brl(tot_dif),
             help="Soma de (pago − previsto). Negativo = pagou menos (desconto); "
                  "positivo = pagou mais (juros/multa).")
+
+# ─── Exportar Excel pra diretoria (.xlsx de verdade — abre certo no Excel) ────
+def _montar_excel_diretoria() -> bytes:
+    sem = res["saidas_sem_titulo"]
+    resumo = pd.DataFrame({
+        "Indicador": ["Período", "Empresa", "Previsto (Contas a Pagar)",
+                      "Pago / conferido", "Previsto e não pago",
+                      "Diferença acumulada (pago-prev)", "Saídas sem título (total)"],
+        "Valor": [f"{d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}",
+                  sel_emp, tot_prev, tot_conf, tot_naopago, tot_dif,
+                  sum(s["valor"] for s in sem)],
+    })
+    conf = pd.DataFrame([{c: v for c, v in ln.items() if c != "_tid"} for ln in linhas]) \
+        .rename(columns={"Δ (pago-prev)": "Diferença (pago-prev)"})
+    semdf = pd.DataFrame([{"Data": pd.to_datetime(s["data"]).strftime("%d/%m/%Y"),
+                           "Empresa": s["empresa_apelido"], "Valor": s["valor"],
+                           "Fornecedor/Contraparte": s["contraparte"] or s["descricao"],
+                           "Categoria": s["plano"]} for s in sem])
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xl:
+        resumo.to_excel(xl, sheet_name="Resumo", index=False)
+        if sem:
+            (semdf.groupby("Categoria", as_index=False)["Valor"].sum()
+             .sort_values("Valor", ascending=False)
+             .to_excel(xl, sheet_name="Sem título por categoria", index=False))
+        conf.to_excel(xl, sheet_name="Conferência", index=False)
+        if sem:
+            semdf.to_excel(xl, sheet_name="Saídas sem título", index=False)
+    return buf.getvalue()
+
+st.download_button(
+    "📊 Baixar Excel (para a diretoria)", data=_montar_excel_diretoria(),
+    file_name=f"Conferencia_ContasPagar_{d_ini.strftime('%Y%m%d')}_"
+              f"{d_fim.strftime('%Y%m%d')}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    help="Abre certinho no Excel (abas: Resumo, Conferência, Saídas sem título).")
 
 st.divider()
 st.caption("🟢 forte (valor+nome) · 🟡 valor bate, nome fraco (confira) · "

@@ -190,120 +190,71 @@ for t in res["titulos"]:
 
 df = pd.DataFrame(linhas)
 
-# ─── KPIs ────────────────────────────────────────────────────────────────────
-# CONFERIDO = baixa salva + casou por NOME (forte) OU por CATEGORIA (valor + mesma
-# categoria — é o caso da folha, CPR no nome da empresa × banco no nome do funcionário).
-casados = [t for t in res["titulos"] if t["_status"] in ("casado", "categoria")]
-sem_pag = [t for t in res["titulos"] if t["_status"] == "sem_saida"]
-tot_prev = sum(t["valor"] for t in titulos_db)
-tot_conf = sum(t["valor"] for t in ja_baixados) + sum(t["valor"] for t in casados)
-tot_naopago = sum(t["valor"] for t in sem_pag)
-tot_dif = sum((s_["valor"] - t["valor"]) for t in ja_baixados
-              if (s_ := sd_por_id.get(t["lancamento_id"]))) \
-    + sum(t["_diferenca"] for t in casados if t["_diferenca"] is not None)
-k = st.columns(4)
-k[0].metric("📋 Previsto (Contas a Pagar)", brl(tot_prev), f"{len(titulos_db)} títulos")
-k[1].metric("✅ Pago / conferido", brl(tot_conf),
-            f"{len(ja_baixados) + len(casados)} de {len(titulos_db)} títulos",
-            delta_color="off",
-            help="Casou por nome (forte) ou por categoria+valor (ex.: folha).")
-k[2].metric("🔴 Sem pagamento no CPR", brl(tot_naopago),
-            f"{len(sem_pag)} títulos",
-            delta_color="off",
-            help="Títulos previstos que não achei pagamento de mesmo valor/categoria.")
-k[3].metric("↔️ Diferença acumulada", brl(tot_dif),
-            help="Soma de (pago − previsto) dos conferidos. Negativo = desconto; "
-                 "positivo = juros/multa.")
+# ─── OS 3 NÚMEROS ────────────────────────────────────────────────────────────
+# Total pago (FORA aplicação/resgate/transferência interna) × Previsto no CPR × Diferença.
+_EXCLUIR_PAGO = ("aplicac", "resgate", "transferencia entre empresas")
+saidas_reais = [s for s in saidas
+                if not any(k in _norm(s["plano"] or "") for k in _EXCLUIR_PAGO)]
+tot_pago = sum(s["valor"] for s in saidas_reais)
+tot_cpr = sum(t["valor"] for t in titulos_db)
+tot_dif = tot_pago - tot_cpr
+k = st.columns(3)
+k[0].metric("💸 Total de saídas (fora aplicações)", brl(tot_pago), f"{len(saidas_reais)} saídas")
+k[1].metric("📋 Está no CPR (previsto)", brl(tot_cpr), f"{len(titulos_db)} títulos")
+k[2].metric("↔️ Diferença", brl(tot_dif), delta_color="off",
+            help="Total pago − o que está no CPR. Positivo = paguei mais do que está no "
+                 "CPR (tem coisa fora do CPR pra lançar). Negativo = o CPR previa mais "
+                 "(parte não paga, ou já lançada como dinheiro).")
 
-# ─── CONCILIAÇÃO POR CATEGORIA (o jeito simples: total × total) ───────────────
-# Não casa título-a-título (impossível na folha, que o CPR lança em bloco e o banco
-# paga espalhado/em dinheiro). Compara, por categoria: o previsto no CPR × o que de
-# fato saiu das contas (SÓ despesa real — fora aplicação, resgate, transferência,
-# pró-labore). A diferença mostra o que faltou pagar (ou foi pago em dinheiro).
-_bucket = bucket_categoria   # mesma categorização do motor (usada no casamento)
-
-prev_bucket: dict = {}
-for t in titulos_db:
-    b = _bucket(t["tipo_docto"] or "")
-    prev_bucket[b] = prev_bucket.get(b, 0) + t["valor"]
-
-cond_pg = ["l.tipo='saida'", "l.data BETWEEN ? AND ?", "p.entra_dre=1"]
-par_pg = [d_ini.isoformat(), d_fim.isoformat()]
-if sel_emp != "Todas":
-    cond_pg.append("l.empresa_id=?"); par_pg.append(emp_por_apelido[sel_emp])
-pago_rows = query(f"SELECT p.nome, SUM(l.valor) tot FROM lancamentos l "
-                  f"JOIN plano_contas p ON p.id=l.plano_conta_id "
-                  f"WHERE {' AND '.join(cond_pg)} GROUP BY p.nome", tuple(par_pg))
-pago_bucket: dict = {}
-for r in pago_rows:
-    b = _bucket(r["nome"])
-    pago_bucket[b] = pago_bucket.get(b, 0) + r["tot"]
+# ─── O QUE PAGUEI QUE NÃO ESTÁ NO CPR (pra lançar) ───────────────────────────
+# Casa por VALOR (multiset): a Nª saída de um valor só está "no CPR" se o CPR tem N
+# títulos daquele valor. O que sobra = paguei e não está previsto → você lança.
+from collections import Counter
+cpr_cnt = Counter(round(t["valor"], 2) for t in titulos_db)
+vistos: Counter = Counter()
+nao_cpr = []
+for s in sorted(saidas_reais, key=lambda x: (x["valor"], x["data"])):
+    v = round(s["valor"], 2)
+    vistos[v] += 1
+    if vistos[v] > cpr_cnt.get(v, 0):
+        nao_cpr.append(s)
 
 st.divider()
-st.subheader("📊 Conciliação por categoria")
-st.caption("O jeito simples: **quanto o CPR previa × quanto saiu das contas** (só "
-           "despesa real — **fora aplicação, transferência e pró-labore**). A folha "
-           "não casa 1-a-1 (o CPR lança em bloco, o banco paga espalhado e parte em "
-           "dinheiro) — aqui você compara o **total** e a **diferença** mostra o que "
-           "faltou (ou foi pago em dinheiro).")
-buckets = sorted(set(prev_bucket) | set(pago_bucket),
-                 key=lambda b: -(prev_bucket.get(b, 0) + pago_bucket.get(b, 0)))
-conc = pd.DataFrame([{
-    "Categoria": b, "Previsto (CPR)": round(prev_bucket.get(b, 0), 2),
-    "Pago pelas contas": round(pago_bucket.get(b, 0), 2),
-    "Diferença (pago − previsto)": round(pago_bucket.get(b, 0) - prev_bucket.get(b, 0), 2),
-} for b in buckets])
-st.dataframe(conc, hide_index=True, use_container_width=True, column_config={
-    "Previsto (CPR)": st.column_config.NumberColumn(format="R$ %.2f"),
-    "Pago pelas contas": st.column_config.NumberColumn(format="R$ %.2f"),
-    "Diferença (pago − previsto)": st.column_config.NumberColumn(format="R$ %.2f")})
-t_prev, t_pago = sum(prev_bucket.values()), sum(pago_bucket.values())
-st.caption(f"**Total** — Previsto no CPR: **{brl(t_prev)}** · Pago pelas contas (despesa "
-           f"real): **{brl(t_pago)}** · Diferença: **{brl(t_pago - t_prev)}**. "
-           "Diferença negativa = faltou pagar ou foi em dinheiro; positiva = pagou algo "
-           "fora do CPR (ex.: tributo, aluguel).")
+st.subheader("🧾 Paguei mas NÃO está no CPR — pra você lançar")
+st.caption("Pagamentos que saíram das contas e **não têm título de mesmo valor no CPR** "
+           "(fora aplicação e transferência interna). É o que falta lançar no CPR.")
+if nao_cpr:
+    nao_cpr_df = pd.DataFrame([{"Data": pd.to_datetime(s["data"]).strftime("%d/%m/%Y"),
+                               "Empresa": s["empresa_apelido"], "Valor": s["valor"],
+                               "Fornecedor/Contraparte": s["contraparte"] or s["descricao"],
+                               "Categoria": s["plano"]} for s in nao_cpr])
+    st.dataframe(nao_cpr_df, hide_index=True, use_container_width=True,
+                 column_config={"Valor": st.column_config.NumberColumn(format="R$ %.2f")})
+    st.caption(f"**{len(nao_cpr)} pagamento(s) · {brl(sum(s['valor'] for s in nao_cpr))}** "
+               "fora do CPR.")
 
-# ─── Exportar Excel pra diretoria (.xlsx de verdade — abre certo no Excel) ────
-def _montar_excel_diretoria() -> bytes:
-    sem = res["saidas_sem_titulo"]
-    resumo = pd.DataFrame({
-        "Indicador": ["Período", "Empresa", "Previsto (Contas a Pagar)",
-                      "Pago / conferido", "Previsto e não pago",
-                      "Diferença acumulada (pago-prev)", "Saídas sem título (total)"],
-        "Valor": [f"{d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}",
-                  sel_emp, tot_prev, tot_conf, tot_naopago, tot_dif,
-                  sum(s["valor"] for s in sem)],
-    })
-    conf = pd.DataFrame([{c: v for c, v in ln.items() if c != "_tid"} for ln in linhas]) \
-        .rename(columns={"Δ (pago-prev)": "Diferença (pago-prev)"})
-    semdf = pd.DataFrame([{"Data": pd.to_datetime(s["data"]).strftime("%d/%m/%Y"),
-                           "Empresa": s["empresa_apelido"], "Valor": s["valor"],
-                           "Fornecedor/Contraparte": s["contraparte"] or s["descricao"],
-                           "Categoria": s["plano"]} for s in sem])
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as xl:
-        resumo.to_excel(xl, sheet_name="Resumo", index=False)
-        conc.to_excel(xl, sheet_name="Conciliação por categoria", index=False)
-        if sem:
-            (semdf.groupby("Categoria", as_index=False)["Valor"].sum()
-             .sort_values("Valor", ascending=False)
-             .to_excel(xl, sheet_name="Sem título por categoria", index=False))
-        conf.to_excel(xl, sheet_name="Conferência", index=False)
-        if sem:
-            semdf.to_excel(xl, sheet_name="Saídas sem título", index=False)
-    return buf.getvalue()
+    def _excel_conc() -> bytes:
+        resumo = pd.DataFrame({
+            "Indicador": ["Período", "Empresa", "Total de saídas (fora aplicações)",
+                          "Está no CPR (previsto)", "Diferença", "Pagamentos fora do CPR"],
+            "Valor": [f"{d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}",
+                      sel_emp, tot_pago, tot_cpr, tot_dif, sum(s["valor"] for s in nao_cpr)]})
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as xl:
+            resumo.to_excel(xl, sheet_name="Resumo", index=False)
+            nao_cpr_df.to_excel(xl, sheet_name="Fora do CPR (lançar)", index=False)
+        return buf.getvalue()
 
-st.download_button(
-    "📊 Baixar Excel (para a diretoria)", data=_montar_excel_diretoria(),
-    file_name=f"Conferencia_ContasPagar_{d_ini.strftime('%Y%m%d')}_"
-              f"{d_fim.strftime('%Y%m%d')}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    help="Abre certinho no Excel (abas: Resumo, Conferência, Saídas sem título).")
+    st.download_button(
+        "📥 Baixar Excel", data=_excel_conc(),
+        file_name=f"Fora_do_CPR_{d_ini.strftime('%Y%m%d')}_{d_fim.strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+else:
+    st.success("Tudo que você pagou já está no CPR. 🎉")
 
 st.divider()
-# ─── 4) Detalhe título-a-título (OPCIONAL) — bom pra bater a mercadoria ───────
-with st.expander("🔎 Detalhe: conferir título por título (opcional — útil pra bater "
-                 "a mercadoria; a folha não casa 1-a-1)"):
+# ─── Detalhe título-a-título (OPCIONAL) — escondido, só se quiser drilar ──────
+with st.expander("🔎 Detalhe: conferir título por título (opcional)"):
     st.caption("🟢 casou (por nome+valor, ou por categoria+valor — ex.: folha) · "
                "🔴 sem pagamento no CPR. Ajuste a coluna **Pagamento** e salve.")
     editado = st.data_editor(
@@ -349,46 +300,3 @@ with st.expander("🔎 Detalhe: conferir título por título (opcional — útil
         st.success(f"Salvo! {n_lig} vínculo(s) novo(s)"
                    + (f" · {n_desl} desfeito(s)" if n_desl else "") + ".")
         st.rerun()
-
-# ─── Saídas sem título (pagou e não estava previsto) ─────────────────────────
-st.divider()
-st.subheader("⚪ Saídas sem título no período")
-sem = res["saidas_sem_titulo"]
-# Busca PURA por valor: esse pagamento tem algum título de MESMO VALOR no CPR?
-# (mesmo que não tenha casado por nome/categoria — dá pra ver que o valor existe lá.)
-_valores_cpr = {round(t["valor"], 2) for t in titulos_db}
-
-
-def _tab_sem(lst):
-    return pd.DataFrame([{"Data": pd.to_datetime(s["data"]).strftime("%d/%m/%Y"),
-                          "Empresa": s["empresa_apelido"], "Valor": s["valor"],
-                          "Fornecedor/Contraparte": s["contraparte"] or s["descricao"],
-                          "Categoria": s["plano"],
-                          "Valor no CPR?": ("✅ sim" if round(s["valor"], 2) in _valores_cpr
-                                            else "—")} for s in lst])
-
-
-if not sem:
-    st.success("Todo pagamento do período casou com um título. 🎉")
-else:
-    revisar = [s for s in sem if _precisa_titulo(s["plano"])]
-    esperado = [s for s in sem if not _precisa_titulo(s["plano"])]
-
-    st.markdown("**⚠️ Precisa de atenção — pagou e talvez devesse ter título no CPR**")
-    st.caption("Pagamentos de fornecedor/despesa que **não casaram** com um título. A coluna "
-               "**Valor no CPR?** mostra se existe um título de mesmo valor lá (aí é só "
-               "categorizar o pagamento ou vincular no detalhe). Folha, taxa e movimento "
-               "interno **não** entram aqui.")
-    if revisar:
-        st.dataframe(_tab_sem(revisar), hide_index=True, use_container_width=True,
-                     column_config={"Valor": st.column_config.NumberColumn(format="R$ %.2f")})
-        st.caption(f"{len(revisar)} pagamento(s) · **{brl(sum(s['valor'] for s in revisar))}** a revisar.")
-    else:
-        st.success("Nenhum pagamento suspeito — todo o resto é folha/taxa/interno (ok). 🎉")
-
-    if esperado:
-        with st.expander(f"Ver os {len(esperado)} que naturalmente NÃO têm título — "
-                         f"folha, taxa, aplicação, pró-labore, tributo "
-                         f"({brl(sum(s['valor'] for s in esperado))}) · nada a fazer"):
-            st.dataframe(_tab_sem(esperado), hide_index=True, use_container_width=True,
-                         column_config={"Valor": st.column_config.NumberColumn(format="R$ %.2f")})

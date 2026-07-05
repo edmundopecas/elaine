@@ -236,6 +236,13 @@ st.divider()
 n_fora = sum(1 for r in linhas_saidas if not r["_ok"])
 v_fora = sum(r["Valor"] for r in linhas_saidas if not r["_ok"])
 st.subheader("🧾 Todas as saídas do período (fora aplicações)")
+mc = st.columns(3)
+mc[0].metric("❌ Fora do CPR — pra lançar", brl(v_fora), f"{n_fora} saídas",
+             delta_color="off")
+mc[1].metric("✅ Já no CPR", brl(tot_pago - v_fora), f"{len(linhas_saidas) - n_fora} saídas",
+             delta_color="off")
+mc[2].metric("💸 Total (fora aplicações)", brl(tot_pago), f"{len(linhas_saidas)} saídas",
+             delta_color="off")
 st.caption("Toda saída que saiu das contas (menos aplicação/transferência interna). "
            "**No CPR?**: ✅ = tem título de mesmo valor **ou** é folha/pessoal (que o CPR "
            "lança em bloco). Os **❌ NÃO** são os que faltam lançar — ficam no topo.")
@@ -244,8 +251,6 @@ saidas_df = (pd.DataFrame(linhas_saidas)
              .drop(columns=["_ok"]))
 st.dataframe(saidas_df, hide_index=True, use_container_width=True,
              column_config={"Valor": st.column_config.NumberColumn(format="R$ %.2f")})
-st.caption(f"**{len(saidas_df)} saídas · {brl(tot_pago)}** no total · "
-           f"**❌ {n_fora} fora do CPR · {brl(v_fora)}** pra lançar.")
 
 
 def _excel_conc() -> bytes:

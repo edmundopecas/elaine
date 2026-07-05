@@ -213,12 +213,20 @@ k[2].metric("↔️ Diferença", brl(tot_dif), delta_color="off",
 # você vê tudo e identifica na hora o que falta lançar (os ❌).
 from collections import Counter
 cpr_cnt = Counter(round(t["valor"], 2) for t in titulos_db)
+# Categorias que o CPR lança EM BLOCO (não por item) — a folha vem como
+# PESSOAL/PAGAMENTOS FUN, e o banco paga por funcionário. Se o CPR tem folha, todo
+# pagamento de folha/pessoal conta como "está no CPR" (não dá pra casar por valor).
+cpr_buckets = {bucket_categoria(t["tipo_docto"] or "") for t in titulos_db}
+folha_no_cpr = "Folha e Pessoal" in cpr_buckets
 vistos: Counter = Counter()
 linhas_saidas = []
 for s in sorted(saidas_reais, key=lambda x: -x["valor"]):
     v = round(s["valor"], 2)
-    vistos[v] += 1
-    coberto = vistos[v] <= cpr_cnt.get(v, 0)
+    if folha_no_cpr and bucket_categoria(s["plano"] or "") == "Folha e Pessoal":
+        coberto = True                       # folha está no CPR em bloco
+    else:
+        vistos[v] += 1
+        coberto = vistos[v] <= cpr_cnt.get(v, 0)
     linhas_saidas.append({
         "_ok": coberto,
         "Data": pd.to_datetime(s["data"]).strftime("%d/%m/%Y"),
@@ -231,9 +239,9 @@ st.divider()
 n_fora = sum(1 for r in linhas_saidas if not r["_ok"])
 v_fora = sum(r["Valor"] for r in linhas_saidas if not r["_ok"])
 st.subheader("🧾 Todas as saídas do período (fora aplicações)")
-st.caption(f"Toda saída que saiu das contas (menos aplicação/transferência interna). "
-           f"A coluna **No CPR?** marca o que já tem título de mesmo valor lá — os "
-           f"**❌ NÃO** são os que faltam lançar. Ordenado com os que faltam em cima.")
+st.caption("Toda saída que saiu das contas (menos aplicação/transferência interna). "
+           "**No CPR?**: ✅ = tem título de mesmo valor **ou** é folha/pessoal (que o CPR "
+           "lança em bloco). Os **❌ NÃO** são os que faltam lançar — ficam no topo.")
 saidas_df = (pd.DataFrame(linhas_saidas)
              .sort_values(["_ok", "Valor"], ascending=[True, False])
              .drop(columns=["_ok"]))

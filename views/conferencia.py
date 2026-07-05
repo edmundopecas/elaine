@@ -190,18 +190,28 @@ for t in res["titulos"]:
 df = pd.DataFrame(linhas)
 
 # ─── KPIs ────────────────────────────────────────────────────────────────────
+# Só conta como CONFERIDO o que está salvo (baixado) ou casou FORTE (nome+valor).
+# Palpite fraco (🟡, só valor) NÃO é conferido — é sugestão pra você confirmar.
+fortes = [t for t in res["titulos"] if t["_status"] == "casado"]
+fracos = [t for t in res["titulos"] if t["_status"] == "valor"]
+sem_pag = [t for t in res["titulos"] if t["_status"] == "sem_saida"]
 tot_prev = sum(t["valor"] for t in titulos_db)
-tot_conf = sum(t["valor"] for t in ja_baixados) + \
-    sum(t["valor"] for t in res["titulos"] if t["_saida"])
-tot_naopago = sum(t["valor"] for t in res["titulos"] if not t["_saida"])
-tot_dif = sum((r["Δ (pago-prev)"] or 0) for r in linhas)
+tot_conf = sum(t["valor"] for t in ja_baixados) + sum(t["valor"] for t in fortes)
+tot_naopago = sum(t["valor"] for t in fracos) + sum(t["valor"] for t in sem_pag)
+tot_dif = sum((s_["valor"] - t["valor"]) for t in ja_baixados
+              if (s_ := sd_por_id.get(t["lancamento_id"]))) \
+    + sum(t["_diferenca"] for t in fortes if t["_diferenca"] is not None)
 k = st.columns(4)
 k[0].metric("📋 Previsto (Contas a Pagar)", brl(tot_prev), f"{len(titulos_db)} títulos")
-k[1].metric("✅ Pago / conferido", brl(tot_conf))
-k[2].metric("🔴 Previsto e não pago", brl(tot_naopago))
+k[1].metric("✅ Pago / conferido", brl(tot_conf),
+            help="Baixas salvas + casamentos fortes (nome e valor batem).")
+k[2].metric("🔴 A conferir / não pago", brl(tot_naopago),
+            f"{len(fracos)} p/ confirmar · {len(sem_pag)} sem pagamento",
+            delta_color="off",
+            help="🟡 têm um pagamento sugerido (confirme na tabela); 🔴 não achei pagamento.")
 k[3].metric("↔️ Diferença acumulada", brl(tot_dif),
-            help="Soma de (pago − previsto). Negativo = pagou menos (desconto); "
-                 "positivo = pagou mais (juros/multa).")
+            help="Soma de (pago − previsto) dos conferidos. Negativo = desconto; "
+                 "positivo = juros/multa.")
 
 # ─── Exportar Excel pra diretoria (.xlsx de verdade — abre certo no Excel) ────
 def _montar_excel_diretoria() -> bytes:
@@ -309,9 +319,10 @@ else:
     esperado = [s for s in sem if not _precisa_titulo(s["plano"])]
 
     st.markdown("**⚠️ Precisa de atenção — pagou e talvez devesse ter título no CPR**")
-    st.caption("São pagamentos de fornecedor/despesa sem título correspondente. Se algum "
-               "DEVIA ter título, ache-o na tabela de cima (fica 🔴 *não pago*) e vincule "
-               "este pagamento lá. Folha, taxa e movimento interno **não** entram aqui.")
+    st.caption("Pagamentos de fornecedor/despesa que **não casaram forte** com um título. "
+               "Se algum é de um título da tabela de cima (aparece lá como 🟡 *sugerido* ou "
+               "🔴 *não pago*), **confirme/vincule lá em cima** e ele sai daqui. Folha, taxa "
+               "e movimento interno **não** entram aqui.")
     if revisar:
         st.dataframe(_tab_sem(revisar), hide_index=True, use_container_width=True,
                      column_config={"Valor": st.column_config.NumberColumn(format="R$ %.2f")})

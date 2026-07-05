@@ -183,16 +183,23 @@ def casar(titulos: list[dict], saidas: list[dict], *,
             pares.append((sim, i, s))
     pares.sort(key=lambda p: p[0], reverse=True)
 
+    # `usadas` = saída já sugerida a algum título (evita sugerir a mesma 2x no topo).
+    # `usadas_forte` = SÓ os casamentos fortes (nome+valor) — são os únicos que tiram
+    # a saída da lista "sem título". Palpite fraco (só valor) NÃO esconde o pagamento:
+    # ele continua aparecendo no "sem título", pra Filipe ver tudo que falta vincular.
     escolha: dict[int, tuple] = {}   # idx_titulo -> (saida, sim)
     usadas: set = set()
+    usadas_forte: set = set()
     for sim, i, s in pares:
         if i in escolha or s["id"] in usadas or sim < piso_sugestao:
             continue
         escolha[i] = (s, sim)
         usadas.add(s["id"])
+        if sim >= limiar_nome:
+            usadas_forte.add(s["id"])
 
     # 2ª passada: título sem par que tem exatamente UMA saída de mesmo valor livre
-    # → aceita como fraco (só o valor bate).
+    # → sugere como fraco (só o valor bate; NÃO é forte, não some do "sem título").
     for i, t in enumerate(titulos):
         if i in escolha:
             continue
@@ -214,5 +221,6 @@ def casar(titulos: list[dict], saidas: list[dict], *,
             t["_saida"], t["_sim"], t["_status"], t["_diferenca"] = None, 0.0, "sem_saida", None
         anotados.append(t)
 
-    sem_titulo = [s for s in saidas if s["id"] not in usadas]
+    # Só o casamento forte tira a saída do "sem título" (palpite fraco não esconde).
+    sem_titulo = [s for s in saidas if s["id"] not in usadas_forte]
     return {"titulos": anotados, "saidas_sem_titulo": sem_titulo}

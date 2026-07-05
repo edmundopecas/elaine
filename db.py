@@ -55,12 +55,18 @@ if IS_PG:
     _SCHEMA_APLICADO = False   # o DDL do schema só roda 1x por processo
 
     def _pg():
-        """Conexão única, reaberta se cair. search_path no schema 'elaine'."""
+        """Conexão única, reaberta se cair.
+
+        O search_path vai como OPÇÃO DE CONEXÃO (startup param), não como `SET`:
+        estamos atrás do pooler de transação do Supabase (porta 6543), que troca o
+        servidor a cada transação — um `SET search_path` roda num servidor e a query
+        seguinte cai em outro que voltou ao schema 'public', dando UndefinedTable nas
+        tabelas do schema 'elaine'. Como opção de startup, o pooler garante o mesmo
+        search_path em todo servidor que ele entregar."""
         global _conn
         if _conn is None or _conn.closed:
-            _conn = psycopg2.connect(DATABASE_URL)
-            with _conn.cursor() as cur:
-                cur.execute("SET search_path TO elaine, public")
+            _conn = psycopg2.connect(DATABASE_URL,
+                                     options="-c search_path=elaine,public")
             _conn.commit()
         return _conn
 

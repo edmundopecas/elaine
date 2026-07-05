@@ -212,22 +212,18 @@ k[2].metric("↔️ Diferença", brl(tot_dif), delta_color="off",
 # coluna "No CPR?" só MARCA se existe um título de mesmo valor no CPR (multiset:
 # a Nª saída de um valor só é 'sim' se o CPR tem N títulos daquele valor). Assim
 # você vê tudo e identifica na hora o que falta lançar (os ❌).
-from collections import Counter
-cpr_cnt = Counter(round(t["valor"], 2) for t in titulos_db)
-# Categorias que o CPR lança EM BLOCO (não por item) — a folha vem como
-# PESSOAL/PAGAMENTOS FUN, e o banco paga por funcionário. Se o CPR tem folha, todo
-# pagamento de folha/pessoal conta como "está no CPR" (não dá pra casar por valor).
+# "Está no CPR?" usa o casamento inteligente (valor + nome/categoria), NÃO valor puro:
+# assim, quando 2 saídas têm o mesmo valor de 1 título, o "sim" vai pra que casa por
+# nome/categoria (ex.: R$420 do SO AL PNEUS, não um PIX devolvido de mesmo valor).
+# Uma saída está "no CPR" se casou (não está em saidas_sem_titulo) OU é folha/pessoal
+# (que o CPR lança em bloco — não dá pra casar por valor).
+sem_titulo_ids = {s["id"] for s in res["saidas_sem_titulo"]}
 cpr_buckets = {bucket_categoria(t["tipo_docto"] or "") for t in titulos_db}
 folha_no_cpr = "Folha e Pessoal" in cpr_buckets
-vistos: Counter = Counter()
 linhas_saidas = []
 for s in sorted(saidas_reais, key=lambda x: -x["valor"]):
-    v = round(s["valor"], 2)
-    if folha_no_cpr and bucket_categoria(s["plano"] or "") == "Folha e Pessoal":
-        coberto = True                       # folha está no CPR em bloco
-    else:
-        vistos[v] += 1
-        coberto = vistos[v] <= cpr_cnt.get(v, 0)
+    eh_folha = folha_no_cpr and bucket_categoria(s["plano"] or "") == "Folha e Pessoal"
+    coberto = (s["id"] not in sem_titulo_ids) or eh_folha
     linhas_saidas.append({
         "_ok": coberto,
         "Data": pd.to_datetime(s["data"]).strftime("%d/%m/%Y"),

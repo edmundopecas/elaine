@@ -21,7 +21,7 @@ import io
 import pandas as pd
 import streamlit as st
 
-from conferencia import _norm, casar, parse_a_pagar
+from conferencia import _norm, bucket_categoria, casar, parse_a_pagar
 from db import execute, executemany, query, query_one
 
 
@@ -165,7 +165,9 @@ rotulo_por_id = {s["id"]: _rotulo_saida(s) for s in saidas}
 id_por_rotulo = {v: k for k, v in rotulo_por_id.items()}
 opcoes = [OP_NENHUM] + [rotulo_por_id[s["id"]] for s in saidas]
 
-EMOJI = {"casado": "🟢", "valor": "🟡", "sem_saida": "🔴"}
+EMOJI = {"casado": "🟢", "categoria": "🟢", "valor": "🟡", "sem_saida": "🔴"}
+ROTULO_STATUS = {"casado": "casado (nome+valor)", "categoria": "casado (categoria+valor)",
+                 "valor": "valor", "sem_saida": "sem pagamento"}
 
 linhas = []
 # títulos já baixados (conferidos) aparecem no topo, travados como 🟢
@@ -180,8 +182,7 @@ for t in ja_baixados:
 for t in res["titulos"]:
     s = t["_saida"]
     linhas.append({"_tid": t["_tid"],
-                   "Status": f"{EMOJI[t['_status']]} {t['_status']}"
-                             + (f" · {int(t['_sim']*100)}%" if s else ""),
+                   "Status": f"{EMOJI[t['_status']]} {ROTULO_STATUS[t['_status']]}",
                    "Fornecedor": t["fornecedor"], "Vencimento": t["vencimento"],
                    "Tipo": t["tipo_docto"], "Previsto": t["valor"],
                    "Pagamento": rotulo_por_id.get(s["id"], OP_NENHUM) if s else OP_NENHUM,
@@ -190,25 +191,26 @@ for t in res["titulos"]:
 df = pd.DataFrame(linhas)
 
 # ─── KPIs ────────────────────────────────────────────────────────────────────
-# Só conta como CONFERIDO o que está salvo (baixado) ou casou FORTE (nome+valor).
-# Palpite fraco (🟡, só valor) NÃO é conferido — é sugestão pra você confirmar.
-fortes = [t for t in res["titulos"] if t["_status"] == "casado"]
-fracos = [t for t in res["titulos"] if t["_status"] == "valor"]
+# CONFERIDO = baixa salva + casou por NOME (forte) OU por CATEGORIA (valor + mesma
+# categoria — é o caso da folha, CPR no nome da empresa × banco no nome do funcionário).
+casados = [t for t in res["titulos"] if t["_status"] in ("casado", "categoria")]
 sem_pag = [t for t in res["titulos"] if t["_status"] == "sem_saida"]
 tot_prev = sum(t["valor"] for t in titulos_db)
-tot_conf = sum(t["valor"] for t in ja_baixados) + sum(t["valor"] for t in fortes)
-tot_naopago = sum(t["valor"] for t in fracos) + sum(t["valor"] for t in sem_pag)
+tot_conf = sum(t["valor"] for t in ja_baixados) + sum(t["valor"] for t in casados)
+tot_naopago = sum(t["valor"] for t in sem_pag)
 tot_dif = sum((s_["valor"] - t["valor"]) for t in ja_baixados
               if (s_ := sd_por_id.get(t["lancamento_id"]))) \
-    + sum(t["_diferenca"] for t in fortes if t["_diferenca"] is not None)
+    + sum(t["_diferenca"] for t in casados if t["_diferenca"] is not None)
 k = st.columns(4)
 k[0].metric("📋 Previsto (Contas a Pagar)", brl(tot_prev), f"{len(titulos_db)} títulos")
 k[1].metric("✅ Pago / conferido", brl(tot_conf),
-            help="Baixas salvas + casamentos fortes (nome e valor batem).")
-k[2].metric("🔴 A conferir / não pago", brl(tot_naopago),
-            f"{len(fracos)} p/ confirmar · {len(sem_pag)} sem pagamento",
+            f"{len(ja_baixados) + len(casados)} de {len(titulos_db)} títulos",
             delta_color="off",
-            help="🟡 têm um pagamento sugerido (confirme na tabela); 🔴 não achei pagamento.")
+            help="Casou por nome (forte) ou por categoria+valor (ex.: folha).")
+k[2].metric("🔴 Sem pagamento no CPR", brl(tot_naopago),
+            f"{len(sem_pag)} títulos",
+            delta_color="off",
+            help="Títulos previstos que não achei pagamento de mesmo valor/categoria.")
 k[3].metric("↔️ Diferença acumulada", brl(tot_dif),
             help="Soma de (pago − previsto) dos conferidos. Negativo = desconto; "
                  "positivo = juros/multa.")
@@ -218,22 +220,7 @@ k[3].metric("↔️ Diferença acumulada", brl(tot_dif),
 # paga espalhado/em dinheiro). Compara, por categoria: o previsto no CPR × o que de
 # fato saiu das contas (SÓ despesa real — fora aplicação, resgate, transferência,
 # pró-labore). A diferença mostra o que faltou pagar (ou foi pago em dinheiro).
-def _bucket(texto: str) -> str:
-    n = _norm(texto or "")
-    if any(k in n for k in ("mercadoria", "cmv", "frete", "dacte")):
-        return "Mercadoria"
-    if any(k in n for k in ("pessoal", "pagamentos fun", "folha", "salario", "ferias",
-                            "mao de obra", "13", "rescis", "pensao", "adiantament")):
-        return "Folha e Pessoal"
-    if any(k in n for k in ("energia", "agua")):
-        return "Energia e Água"
-    if any(k in n for k in ("constru", "obra", "reforma")):
-        return "Construção"
-    if any(k in n for k in ("icms", "tributo", "imposto", "gnre", "fecoep", "pis",
-                            "cofins", "fgts", "gps", "inss")):
-        return "Tributos"
-    return "Outros / Administrativo"
-
+_bucket = bucket_categoria   # mesma categorização do motor (usada no casamento)
 
 prev_bucket: dict = {}
 for t in titulos_db:
@@ -317,8 +304,8 @@ st.divider()
 # ─── 4) Detalhe título-a-título (OPCIONAL) — bom pra bater a mercadoria ───────
 with st.expander("🔎 Detalhe: conferir título por título (opcional — útil pra bater "
                  "a mercadoria; a folha não casa 1-a-1)"):
-    st.caption("🟢 forte (valor+nome) · 🟡 valor bate, nome fraco (confira) · "
-               "🔴 sem pagamento. Ajuste a coluna **Pagamento** e salve.")
+    st.caption("🟢 casou (por nome+valor, ou por categoria+valor — ex.: folha) · "
+               "🔴 sem pagamento no CPR. Ajuste a coluna **Pagamento** e salve.")
     editado = st.data_editor(
         df, hide_index=True, use_container_width=True, key="conf_editor",
         column_config={
@@ -367,13 +354,18 @@ with st.expander("🔎 Detalhe: conferir título por título (opcional — útil
 st.divider()
 st.subheader("⚪ Saídas sem título no período")
 sem = res["saidas_sem_titulo"]
+# Busca PURA por valor: esse pagamento tem algum título de MESMO VALOR no CPR?
+# (mesmo que não tenha casado por nome/categoria — dá pra ver que o valor existe lá.)
+_valores_cpr = {round(t["valor"], 2) for t in titulos_db}
 
 
 def _tab_sem(lst):
     return pd.DataFrame([{"Data": pd.to_datetime(s["data"]).strftime("%d/%m/%Y"),
                           "Empresa": s["empresa_apelido"], "Valor": s["valor"],
                           "Fornecedor/Contraparte": s["contraparte"] or s["descricao"],
-                          "Categoria": s["plano"]} for s in lst])
+                          "Categoria": s["plano"],
+                          "Valor no CPR?": ("✅ sim" if round(s["valor"], 2) in _valores_cpr
+                                            else "—")} for s in lst])
 
 
 if not sem:
@@ -383,10 +375,10 @@ else:
     esperado = [s for s in sem if not _precisa_titulo(s["plano"])]
 
     st.markdown("**⚠️ Precisa de atenção — pagou e talvez devesse ter título no CPR**")
-    st.caption("Pagamentos de fornecedor/despesa que **não casaram forte** com um título. "
-               "Se algum é de um título da tabela de cima (aparece lá como 🟡 *sugerido* ou "
-               "🔴 *não pago*), **confirme/vincule lá em cima** e ele sai daqui. Folha, taxa "
-               "e movimento interno **não** entram aqui.")
+    st.caption("Pagamentos de fornecedor/despesa que **não casaram** com um título. A coluna "
+               "**Valor no CPR?** mostra se existe um título de mesmo valor lá (aí é só "
+               "categorizar o pagamento ou vincular no detalhe). Folha, taxa e movimento "
+               "interno **não** entram aqui.")
     if revisar:
         st.dataframe(_tab_sem(revisar), hide_index=True, use_container_width=True,
                      column_config={"Valor": st.column_config.NumberColumn(format="R$ %.2f")})

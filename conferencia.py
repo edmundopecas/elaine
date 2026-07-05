@@ -34,6 +34,26 @@ def _digitos(s) -> str:
     return re.sub(r"\D", "", str(s or ""))
 
 
+def bucket_categoria(texto: str) -> str:
+    """Agrupa tipo_docto (CPR) e plano de contas (banco) nos MESMOS grupos, pra casar
+    por categoria. Ex.: CPR 'PESSOAL' e banco 'Férias'/'Salários' caem em 'Folha e
+    Pessoal'; CPR 'MERCADORIA' e banco 'Custo de Mercadoria' em 'Mercadoria'."""
+    n = _norm(texto or "")
+    if any(k in n for k in ("mercadoria", "cmv", "frete", "dacte")):
+        return "Mercadoria"
+    if any(k in n for k in ("pessoal", "pagamentos fun", "folha", "salario", "ferias",
+                            "mao de obra", "13", "rescis", "pensao", "adiantament")):
+        return "Folha e Pessoal"
+    if any(k in n for k in ("energia", "agua")):
+        return "Energia e Água"
+    if any(k in n for k in ("constru", "obra", "reforma")):
+        return "Construção"
+    if any(k in n for k in ("icms", "tributo", "imposto", "gnre", "fecoep", "pis",
+                            "cofins", "fgts", "gps", "inss")):
+        return "Tributos"
+    return "Outros / Administrativo"
+
+
 # Palpite loja do Argos → apelido de empresa do app. O casamento real é por
 # valor+nome; a loja é só um sinal fraco (e segmentação na tela). Braga não é
 # empresa do app → fica sem empresa. Ajustável sem medo.
@@ -173,7 +193,11 @@ def casar(titulos: list[dict], saidas: list[dict], *,
     for s in saidas:
         por_valor.setdefault(_reais(s["valor"]), []).append(s)
 
-    # Todos os pares título×saída de mesmo valor, com a similaridade de nome.
+    # Categoria (bucket) de cada título (tipo_docto do CPR) e de cada saída (plano).
+    bkt_t = [bucket_categoria(t.get("tipo_docto") or "") for t in titulos]
+    bkt_s = {s["id"]: bucket_categoria(s.get("plano") or "") for s in saidas}
+
+    # Pares título×saída de MESMO VALOR, com a similaridade de nome.
     pares = []
     for i, t in enumerate(titulos):
         for s in por_valor.get(_reais(t["valor"]), []):
@@ -183,44 +207,34 @@ def casar(titulos: list[dict], saidas: list[dict], *,
             pares.append((sim, i, s))
     pares.sort(key=lambda p: p[0], reverse=True)
 
-    # `usadas` = saída já sugerida a algum título (evita sugerir a mesma 2x no topo).
-    # `usadas_forte` = SÓ os casamentos fortes (nome+valor) — são os únicos que tiram
-    # a saída da lista "sem título". Palpite fraco (só valor) NÃO esconde o pagamento:
-    # ele continua aparecendo no "sem título", pra Filipe ver tudo que falta vincular.
-    escolha: dict[int, tuple] = {}   # idx_titulo -> (saida, sim)
+    # CASA (guloso, do melhor pro pior) quando o valor bate E (o NOME é forte OU a
+    # CATEGORIA é a mesma). Isso acha a folha (CPR no nome da empresa × banco no nome
+    # do funcionário, mas ambos 'Folha e Pessoal') e a mercadoria, sem grudar folha
+    # num título de mercadoria só porque o valor coincidiu.
+    escolha: dict[int, tuple] = {}   # idx_titulo -> (saida, sim, casou_por_nome)
     usadas: set = set()
-    usadas_forte: set = set()
     for sim, i, s in pares:
-        if i in escolha or s["id"] in usadas or sim < piso_sugestao:
+        if i in escolha or s["id"] in usadas:
             continue
-        escolha[i] = (s, sim)
-        usadas.add(s["id"])
-        if sim >= limiar_nome:
-            usadas_forte.add(s["id"])
-
-    # 2ª passada: título sem par que tem exatamente UMA saída de mesmo valor livre
-    # → sugere como fraco (só o valor bate; NÃO é forte, não some do "sem título").
-    for i, t in enumerate(titulos):
-        if i in escolha:
-            continue
-        livres = [s for s in por_valor.get(_reais(t["valor"]), []) if s["id"] not in usadas]
-        if len(livres) == 1:
-            escolha[i] = (livres[0], similaridade(t["fornecedor"], _nome_saida(livres[0])))
-            usadas.add(livres[0]["id"])
+        forte_nome = sim >= limiar_nome
+        mesma_cat = bkt_t[i] != "Outros / Administrativo" and bkt_t[i] == bkt_s[s["id"]]
+        if forte_nome or mesma_cat:
+            escolha[i] = (s, sim, forte_nome)
+            usadas.add(s["id"])
 
     anotados = []
     for i, t in enumerate(titulos):
         t = dict(t)
         if i in escolha:
-            s, sim = escolha[i]
+            s, sim, forte_nome = escolha[i]
             t["_saida"] = s
             t["_sim"] = round(min(sim, 1.0), 3)
-            t["_status"] = "casado" if sim >= limiar_nome else "valor"
+            t["_status"] = "casado" if forte_nome else "categoria"
             t["_diferenca"] = round(s["valor"] - t["valor"], 2)
         else:
             t["_saida"], t["_sim"], t["_status"], t["_diferenca"] = None, 0.0, "sem_saida", None
         anotados.append(t)
 
-    # Só o casamento forte tira a saída do "sem título" (palpite fraco não esconde).
-    sem_titulo = [s for s in saidas if s["id"] not in usadas_forte]
+    # Toda saída casada (por nome OU categoria) sai do "sem título".
+    sem_titulo = [s for s in saidas if s["id"] not in usadas]
     return {"titulos": anotados, "saidas_sem_titulo": sem_titulo}

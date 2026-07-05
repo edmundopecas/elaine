@@ -578,6 +578,74 @@ def parse_asaas_xlsx(file_bytes: bytes) -> list[dict[str, Any]]:
     return movs
 
 
+def _eh_html_disfarcado(file_bytes: bytes) -> bool:
+    """Alguns bancos (Safra) exportam 'Excel' que na verdade é HTML com <table>."""
+    inicio = file_bytes[:1024].lstrip().lower()
+    return (inicio.startswith(b"<html") or inicio.startswith(b"<!doctype html")
+            or inicio.startswith(b"<table") or b"<table" in inicio[:512])
+
+
+def parse_safra_html(file_bytes: bytes) -> list[dict[str, Any]]:
+    """Safra: exporta o extrato como HTML disfarçado de .xls. A tabela de movimentos
+    tem Data | Situação | Tipo (Crédito/Débito) | Lançamento | Complemento | Nº Doc |
+    Valor | Saldo. Complemento traz a contraparte do PIX; boleto DDA vem somado por
+    dia (itemizar depois na tela de Detalhar Boletos DDA)."""
+    import pandas as pd
+    tabs = pd.read_html(io.BytesIO(file_bytes))
+    alvo = None
+    for t in tabs:
+        for i in range(min(6, len(t))):
+            cels = [_norm_xls(x) for x in t.iloc[i].tolist()]
+            if any(c == "data" for c in cels) and any("lancamento" in c for c in cels) \
+                    and any("valor" in c for c in cels):
+                alvo = (t, i)
+                break
+        if alvo:
+            break
+    if alvo is None:
+        return []
+    t, hi = alvo
+    header = [_norm_xls(x) for x in t.iloc[hi].tolist()]
+
+    def idx(*keys, excluir=()):
+        for j, h in enumerate(header):
+            if any(k in h for k in keys) and not any(e in h for e in excluir):
+                return j
+        return None
+
+    j_data, j_tipo = idx("data"), idx("tipo")
+    # "Lançamento" ≠ "Tipo do Lançamento" (as duas têm 'lancamento') — exclui 'tipo'
+    j_lanc, j_compl = idx("lancamento", excluir=("tipo",)), idx("complemento")
+    j_doc, j_val = idx("documento"), idx("valor")
+    movs = []
+    for r in range(hi + 1, len(t)):
+        row = t.iloc[r].tolist()
+        data = _xls_data(row[j_data]) if j_data is not None else None
+        valor = _num_br(row[j_val]) if j_val is not None else None
+        if data is None or valor is None:
+            continue
+        lanc = re.sub(r"\s+", " ", str(row[j_lanc]).strip()) if j_lanc is not None else ""
+        if _norm_xls(lanc).startswith("saldo"):
+            continue
+        tipo = _norm_xls(row[j_tipo]) if j_tipo is not None else ""
+        if valor > 0 and tipo.startswith("deb"):      # sinal de reforço pelo Tipo
+            valor = -valor
+        compl = row[j_compl] if j_compl is not None else None
+        compl = re.sub(r"\s+", " ", str(compl).strip()) \
+            if compl is not None and str(compl).strip().lower() != "nan" else ""
+        doc = re.sub(r"\D", "", str(row[j_doc])) if j_doc is not None else ""
+        doc = None if doc in ("", "0", "000000000") else doc
+        texto = f"{lanc} {compl}".strip()
+        cnpj_m = _RE_CNPJ.search(texto) or _RE_CPF.search(texto)
+        cp = _limpar_contraparte(compl) if compl else _limpar_contraparte(lanc)
+        historico = (f"{lanc} {compl}".strip() if compl else lanc).title()
+        movs.append(_mov_xls(
+            data, valor, historico,
+            (cp.title() if cp and not str(cp).isdigit() else (cp or None)),
+            _so_digitos(cnpj_m.group(1)) if cnpj_m else None, doc))
+    return movs
+
+
 _LEITORES_XLSX = {
     "Banco do Brasil": parse_bb_xlsx,
     "Santander": parse_santander_xlsx,
@@ -589,7 +657,12 @@ _LEITORES_XLSX = {
 def detectar_banco_xlsx(file_bytes: bytes) -> str | None:
     """Reconhece o banco pelo cabeçalho do Excel. None = layout não suportado ainda."""
     import pandas as pd
-    raw = pd.read_excel(io.BytesIO(file_bytes), header=None, nrows=30)
+    if _eh_html_disfarcado(file_bytes):   # Safra vem como HTML disfarçado de .xls
+        return "Safra" if b"safra" in file_bytes[:3000].lower() else None
+    try:
+        raw = pd.read_excel(io.BytesIO(file_bytes), header=None, nrows=30)
+    except Exception:
+        return None
     blob = " | ".join(_norm_xls(x) for row in raw.values.tolist() for x in row)
     if "tipo de transacao" in blob or ("transacao" in blob and "saldo inicial" in blob):
         return "Asaas"
@@ -604,12 +677,19 @@ def detectar_banco_xlsx(file_bytes: bytes) -> str | None:
 
 def parse_extrato_xlsx(file_bytes: bytes) -> tuple[str, list[dict[str, Any]]]:
     """Detecta o banco e devolve (banco, movimentos). Erra claro se não reconhecer."""
+    if _eh_html_disfarcado(file_bytes):
+        # Safra exporta o extrato como HTML disfarçado de .xls
+        if b"safra" in file_bytes[:3000].lower():
+            return "Safra", parse_safra_html(file_bytes)
+        raise ValueError(
+            "Esse arquivo é HTML disfarçado de Excel e, nesse formato, só sei ler "
+            "o do Safra. Me manda o arquivo que eu ensino.")
     banco = detectar_banco_xlsx(file_bytes)
     if banco is None:
         raise ValueError(
             "Não reconheci de qual banco é esse Excel. Já leio: "
-            + ", ".join(_LEITORES_XLSX) + ". (Safra em Excel ainda não — "
-            "me manda o arquivo que eu ensino.)")
+            + ", ".join(_LEITORES_XLSX) + " e Safra. "
+            "Me manda o arquivo que eu ensino o layout novo.")
     return banco, _LEITORES_XLSX[banco](file_bytes)
 
 

@@ -104,12 +104,28 @@ if arquivo:
         "SELECT linha_hash FROM lancamentos WHERE linha_hash IS NOT NULL")}
     a_inserir, duplicados = planejar_insercao(movimentos, existentes, hashes_globais)
 
+    # Proteção do DDA: se um dia já foi ITEMIZADO (origem 'dda-detalhe'), a linha
+    # somada "PAGAMENTO DE BOLETO DDA" daquele dia NÃO volta na reimportação —
+    # senão dobraria os boletos já detalhados.
+    dias_dda = {r["data"] for r in query(
+        "SELECT DISTINCT data FROM lancamentos WHERE empresa_id=? AND origem='dda-detalhe'",
+        (emp_id,))}
+    protegidos = [x for x in a_inserir
+                  if "BOLETO DDA" in (x[0]["historico"] or "").upper()
+                  and x[0]["data"].isoformat() in dias_dda]
+    if protegidos:
+        prot_ids = {id(x) for x in protegidos}
+        a_inserir = [x for x in a_inserir if id(x) not in prot_ids]
+
     internas = sum(1 for m, _ in a_inserir if (m["_categoria"] or "").startswith("↔"))
     por_regra = sum(1 for m, _ in a_inserir if m["_regra"])
     pendentes = sum(1 for m, _ in a_inserir if not m["_classificado"])
     st.success(f"**{len(movimentos)}** movimentos lidos · **{len(a_inserir)}** novos "
                f"({internas} transferências internas · {por_regra} por regras · "
                f"{pendentes} ficarão pendentes) · **{duplicados}** já estavam no sistema.")
+    if protegidos:
+        st.caption(f"🛡️ {len(protegidos)} linha(s) de **boleto DDA somado** ignorada(s) — "
+                   "esse(s) dia(s) já foi detalhado boleto a boleto (não vou dobrar).")
 
     st.dataframe(
         [{"Data": m["data"], "Tipo": m["tipo"], "Valor": f"R$ {m['valor']:,.2f}",
@@ -131,7 +147,7 @@ if arquivo:
             "arquivo_hash, formato, linhas_total) VALUES (?, ?, ?, ?, ?, ?)",
             (emp_id, conta_id, arquivo.name, arq_hash, ext, len(movimentos)),
         )
-        origem = "extrato-xls" if ext in ("xlsx", "xls") else "extrato"
+        origem = "extrato"  # formato (xlsx/ofx/csv) fica em importacoes.formato
         for m, lh in a_inserir:
             execute(
                 "INSERT INTO lancamentos (empresa_id, conta_bancaria_id, data, descricao, "

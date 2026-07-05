@@ -191,8 +191,9 @@ for t in res["titulos"]:
 df = pd.DataFrame(linhas)
 
 # ─── OS 3 NÚMEROS ────────────────────────────────────────────────────────────
-# Total pago (FORA aplicação/resgate/transferência interna) × Previsto no CPR × Diferença.
-_EXCLUIR_PAGO = ("aplicac", "resgate", "transferencia entre empresas")
+# Total pago (FORA só aplicação/resgate — a pedido do Filipe: "todas as saídas exceto
+# as aplicações"; transferência entre empresas ENTRA, igual à planilha de Saídas dele).
+_EXCLUIR_PAGO = ("aplicac", "resgate")
 saidas_reais = [s for s in saidas
                 if not any(k in _norm(s["plano"] or "") for k in _EXCLUIR_PAGO)]
 tot_pago = sum(s["valor"] for s in saidas_reais)

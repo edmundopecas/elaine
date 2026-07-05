@@ -206,51 +206,60 @@ k[2].metric("↔️ Diferença", brl(tot_dif), delta_color="off",
                  "CPR (tem coisa fora do CPR pra lançar). Negativo = o CPR previa mais "
                  "(parte não paga, ou já lançada como dinheiro).")
 
-# ─── O QUE PAGUEI QUE NÃO ESTÁ NO CPR (pra lançar) ───────────────────────────
-# Casa por VALOR (multiset): a Nª saída de um valor só está "no CPR" se o CPR tem N
-# títulos daquele valor. O que sobra = paguei e não está previsto → você lança.
+# ─── TODAS AS SAÍDAS (fora aplicações), com flag "está no CPR?" ──────────────
+# NÃO esconde nada: mostra toda saída (menos aplicação/transferência interna). A
+# coluna "No CPR?" só MARCA se existe um título de mesmo valor no CPR (multiset:
+# a Nª saída de um valor só é 'sim' se o CPR tem N títulos daquele valor). Assim
+# você vê tudo e identifica na hora o que falta lançar (os ❌).
 from collections import Counter
 cpr_cnt = Counter(round(t["valor"], 2) for t in titulos_db)
 vistos: Counter = Counter()
-nao_cpr = []
-for s in sorted(saidas_reais, key=lambda x: (x["valor"], x["data"])):
+linhas_saidas = []
+for s in sorted(saidas_reais, key=lambda x: -x["valor"]):
     v = round(s["valor"], 2)
     vistos[v] += 1
-    if vistos[v] > cpr_cnt.get(v, 0):
-        nao_cpr.append(s)
+    coberto = vistos[v] <= cpr_cnt.get(v, 0)
+    linhas_saidas.append({
+        "_ok": coberto,
+        "Data": pd.to_datetime(s["data"]).strftime("%d/%m/%Y"),
+        "Empresa": s["empresa_apelido"], "Valor": s["valor"],
+        "Fornecedor/Contraparte": s["contraparte"] or s["descricao"],
+        "Categoria": s["plano"],
+        "No CPR?": "✅ sim" if coberto else "❌ NÃO — lançar"})
 
 st.divider()
-st.subheader("🧾 Paguei mas NÃO está no CPR — pra você lançar")
-st.caption("Pagamentos que saíram das contas e **não têm título de mesmo valor no CPR** "
-           "(fora aplicação e transferência interna). É o que falta lançar no CPR.")
-if nao_cpr:
-    nao_cpr_df = pd.DataFrame([{"Data": pd.to_datetime(s["data"]).strftime("%d/%m/%Y"),
-                               "Empresa": s["empresa_apelido"], "Valor": s["valor"],
-                               "Fornecedor/Contraparte": s["contraparte"] or s["descricao"],
-                               "Categoria": s["plano"]} for s in nao_cpr])
-    st.dataframe(nao_cpr_df, hide_index=True, use_container_width=True,
-                 column_config={"Valor": st.column_config.NumberColumn(format="R$ %.2f")})
-    st.caption(f"**{len(nao_cpr)} pagamento(s) · {brl(sum(s['valor'] for s in nao_cpr))}** "
-               "fora do CPR.")
+n_fora = sum(1 for r in linhas_saidas if not r["_ok"])
+v_fora = sum(r["Valor"] for r in linhas_saidas if not r["_ok"])
+st.subheader("🧾 Todas as saídas do período (fora aplicações)")
+st.caption(f"Toda saída que saiu das contas (menos aplicação/transferência interna). "
+           f"A coluna **No CPR?** marca o que já tem título de mesmo valor lá — os "
+           f"**❌ NÃO** são os que faltam lançar. Ordenado com os que faltam em cima.")
+saidas_df = (pd.DataFrame(linhas_saidas)
+             .sort_values(["_ok", "Valor"], ascending=[True, False])
+             .drop(columns=["_ok"]))
+st.dataframe(saidas_df, hide_index=True, use_container_width=True,
+             column_config={"Valor": st.column_config.NumberColumn(format="R$ %.2f")})
+st.caption(f"**{len(saidas_df)} saídas · {brl(tot_pago)}** no total · "
+           f"**❌ {n_fora} fora do CPR · {brl(v_fora)}** pra lançar.")
 
-    def _excel_conc() -> bytes:
-        resumo = pd.DataFrame({
-            "Indicador": ["Período", "Empresa", "Total de saídas (fora aplicações)",
-                          "Está no CPR (previsto)", "Diferença", "Pagamentos fora do CPR"],
-            "Valor": [f"{d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}",
-                      sel_emp, tot_pago, tot_cpr, tot_dif, sum(s["valor"] for s in nao_cpr)]})
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine="openpyxl") as xl:
-            resumo.to_excel(xl, sheet_name="Resumo", index=False)
-            nao_cpr_df.to_excel(xl, sheet_name="Fora do CPR (lançar)", index=False)
-        return buf.getvalue()
 
-    st.download_button(
-        "📥 Baixar Excel", data=_excel_conc(),
-        file_name=f"Fora_do_CPR_{d_ini.strftime('%Y%m%d')}_{d_fim.strftime('%Y%m%d')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-else:
-    st.success("Tudo que você pagou já está no CPR. 🎉")
+def _excel_conc() -> bytes:
+    resumo = pd.DataFrame({
+        "Indicador": ["Período", "Empresa", "Total de saídas (fora aplicações)",
+                      "Está no CPR (previsto)", "Diferença", "Saídas fora do CPR"],
+        "Valor": [f"{d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}",
+                  sel_emp, tot_pago, tot_cpr, tot_dif, v_fora]})
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xl:
+        resumo.to_excel(xl, sheet_name="Resumo", index=False)
+        saidas_df.to_excel(xl, sheet_name="Saídas (No CPR)", index=False)
+    return buf.getvalue()
+
+
+st.download_button(
+    "📥 Baixar Excel", data=_excel_conc(),
+    file_name=f"Saidas_x_CPR_{d_ini.strftime('%Y%m%d')}_{d_fim.strftime('%Y%m%d')}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 st.divider()
 # ─── Detalhe título-a-título (OPCIONAL) — escondido, só se quiser drilar ──────

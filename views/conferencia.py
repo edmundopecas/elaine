@@ -21,7 +21,7 @@ import io
 import pandas as pd
 import streamlit as st
 
-from conferencia import casar, parse_a_pagar
+from conferencia import _norm, casar, parse_a_pagar
 from db import execute, executemany, query, query_one
 
 
@@ -29,6 +29,28 @@ def brl(v) -> str:
     if v is None:
         return "—"
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+# Categorias que, por natureza, NÃO têm título no Contas a Pagar (folha paga por
+# funcionário, taxas, tarifas, aplicação/resgate, transferência, tributo, etc.).
+# Uma saída dessas na lista "sem título" é ESPERADA — não precisa vincular.
+_NAO_PRECISA_TITULO = (
+    "mao de obra", "salario", "13", "ferias", "rescis", "pro-labore", "pro labore",
+    "pessoal", "folha", "fgts", "inss", "gps", "pensao", "adiantamento",
+    "tarifa", "taxas de cartao", "adquirente", "outras despesas financeiras",
+    "juros", "iof", "aplicac", "resgate", "rendiment",
+    "transferencia entre empresas", "consorcio", "emprestimo", "financiamento",
+    "devolu", "icms", "tributo", "imposto", "fecoep", "plano de saude", "seguro",
+)
+
+
+def _precisa_titulo(categoria) -> bool:
+    """True = pagamento que DEVERIA ter um título no CPR (revisar); False = folha/
+    taxa/interno (esperado não ter título). Sem categoria também vira 'revisar'."""
+    if not categoria or categoria in ("—", "A classificar"):
+        return True
+    n = _norm(categoria)
+    return not any(k in n for k in _NAO_PRECISA_TITULO)
 
 
 st.title("⚖️ Conferência — Contas a Pagar × Pagamentos")
@@ -270,16 +292,36 @@ if st.button("💾 Salvar vínculos", type="primary"):
 # ─── Saídas sem título (pagou e não estava previsto) ─────────────────────────
 st.divider()
 st.subheader("⚪ Saídas sem título no período")
-st.caption("Pagamentos que saíram do extrato mas não casaram com nenhum título "
-           "do Contas a Pagar (podem ser folha, taxa, transferência, ou título faltando).")
 sem = res["saidas_sem_titulo"]
-if sem:
-    dsem = pd.DataFrame([{"Data": pd.to_datetime(s["data"]).strftime("%d/%m/%Y"),
+
+
+def _tab_sem(lst):
+    return pd.DataFrame([{"Data": pd.to_datetime(s["data"]).strftime("%d/%m/%Y"),
                           "Empresa": s["empresa_apelido"], "Valor": s["valor"],
                           "Fornecedor/Contraparte": s["contraparte"] or s["descricao"],
-                          "Categoria": s["plano"]} for s in sem])
-    st.dataframe(dsem, hide_index=True, use_container_width=True,
-                 column_config={"Valor": st.column_config.NumberColumn(format="R$ %.2f")})
-    st.caption(f"{len(sem)} saída(s) · {brl(sum(s['valor'] for s in sem))} sem título correspondente.")
-else:
+                          "Categoria": s["plano"]} for s in lst])
+
+
+if not sem:
     st.success("Todo pagamento do período casou com um título. 🎉")
+else:
+    revisar = [s for s in sem if _precisa_titulo(s["plano"])]
+    esperado = [s for s in sem if not _precisa_titulo(s["plano"])]
+
+    st.markdown("**⚠️ Precisa de atenção — pagou e talvez devesse ter título no CPR**")
+    st.caption("São pagamentos de fornecedor/despesa sem título correspondente. Se algum "
+               "DEVIA ter título, ache-o na tabela de cima (fica 🔴 *não pago*) e vincule "
+               "este pagamento lá. Folha, taxa e movimento interno **não** entram aqui.")
+    if revisar:
+        st.dataframe(_tab_sem(revisar), hide_index=True, use_container_width=True,
+                     column_config={"Valor": st.column_config.NumberColumn(format="R$ %.2f")})
+        st.caption(f"{len(revisar)} pagamento(s) · **{brl(sum(s['valor'] for s in revisar))}** a revisar.")
+    else:
+        st.success("Nenhum pagamento suspeito — todo o resto é folha/taxa/interno (ok). 🎉")
+
+    if esperado:
+        with st.expander(f"Ver os {len(esperado)} que naturalmente NÃO têm título — "
+                         f"folha, taxa, aplicação, pró-labore, tributo "
+                         f"({brl(sum(s['valor'] for s in esperado))}) · nada a fazer"):
+            st.dataframe(_tab_sem(esperado), hide_index=True, use_container_width=True,
+                         column_config={"Valor": st.column_config.NumberColumn(format="R$ %.2f")})

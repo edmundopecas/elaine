@@ -21,7 +21,7 @@ import io
 import pandas as pd
 import streamlit as st
 
-from conferencia import _norm, bucket_categoria, casar, parse_a_pagar
+from conferencia import _norm, bucket_categoria, casar, parse_a_pagar, similaridade
 from db import execute, executemany, query, query_one
 
 
@@ -212,18 +212,50 @@ k[2].metric("↔️ Diferença", brl(tot_dif), delta_color="off",
 # coluna "No CPR?" só MARCA se existe um título de mesmo valor no CPR (multiset:
 # a Nª saída de um valor só é 'sim' se o CPR tem N títulos daquele valor). Assim
 # você vê tudo e identifica na hora o que falta lançar (os ❌).
-# "Está no CPR?" usa o casamento inteligente (valor + nome/categoria), NÃO valor puro:
-# assim, quando 2 saídas têm o mesmo valor de 1 título, o "sim" vai pra que casa por
-# nome/categoria (ex.: R$420 do SO AL PNEUS, não um PIX devolvido de mesmo valor).
-# Uma saída está "no CPR" se casou (não está em saidas_sem_titulo) OU é folha/pessoal
-# (que o CPR lança em bloco — não dá pra casar por valor).
-sem_titulo_ids = {s["id"] for s in res["saidas_sem_titulo"]}
+# "Está no CPR?" por CONTAGEM DE VALOR: se o CPR tem N títulos de um valor e há N (ou
+# menos) saídas desse valor → todas "sim". Só quando há MAIS saídas que títulos daquele
+# valor é que uso nome/categoria pra escolher qual saída fica coberta (ex.: R$420 com 2
+# saídas e 1 título → o SO AL PNEUS fica 'sim', a devolução de mesmo valor 'não').
+# Folha/pessoal conta como 'sim' sempre (o CPR lança folha em bloco, não por item).
+from collections import Counter, defaultdict
+cpr_cnt = Counter(round(t["valor"], 2) for t in titulos_db)
+titulos_por_valor: dict = defaultdict(list)
+for t in titulos_db:
+    titulos_por_valor[round(t["valor"], 2)].append(t)
+saidas_por_valor: dict = defaultdict(list)
+for s in saidas_reais:
+    saidas_por_valor[round(s["valor"], 2)].append(s)
 cpr_buckets = {bucket_categoria(t["tipo_docto"] or "") for t in titulos_db}
 folha_no_cpr = "Folha e Pessoal" in cpr_buckets
+
+
+def _score(s, tits) -> float:
+    sb = bucket_categoria(s["plano"] or "")
+    melhor = 0.0
+    for t in tits:
+        sim = similaridade(t["contraparte"] or "", s["contraparte"] or s["descricao"] or "")
+        tb = bucket_categoria(t["tipo_docto"] or "")
+        if tb != "Outros / Administrativo" and tb == sb:
+            sim = max(sim, 0.65)          # categoria bate = bom candidato
+        melhor = max(melhor, sim)
+    return melhor
+
+
+cobertos_ids: set = set()
+for v, ss in saidas_por_valor.items():
+    n_tit = cpr_cnt.get(v, 0)
+    if n_tit == 0:
+        continue
+    if len(ss) <= n_tit:
+        cobertos_ids.update(s["id"] for s in ss)          # todas cobertas
+    else:                                                  # mais saídas que títulos
+        ranked = sorted(ss, key=lambda s: _score(s, titulos_por_valor[v]), reverse=True)
+        cobertos_ids.update(s["id"] for s in ranked[:n_tit])
+
 linhas_saidas = []
 for s in sorted(saidas_reais, key=lambda x: -x["valor"]):
     eh_folha = folha_no_cpr and bucket_categoria(s["plano"] or "") == "Folha e Pessoal"
-    coberto = (s["id"] not in sem_titulo_ids) or eh_folha
+    coberto = (s["id"] in cobertos_ids) or eh_folha
     linhas_saidas.append({
         "_ok": coberto,
         "Data": pd.to_datetime(s["data"]).strftime("%d/%m/%Y"),

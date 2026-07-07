@@ -35,8 +35,11 @@ def brl(v) -> str:
 # Categorias que, por natureza, NÃO têm título no Contas a Pagar (folha paga por
 # funcionário, taxas, tarifas, aplicação/resgate, transferência, tributo, etc.).
 # Uma saída dessas na lista "sem título" é ESPERADA — não precisa vincular.
+# ATENÇÃO: NÃO incluir "mão de obra" — as categorias "... - Mão de Obra" (Forene,
+# Edmundo, Rio Largo) são OBRA/serviço de terceiro (empreiteiro, pedreiro), que DEVE
+# ter título no CPR; não é folha em bloco. Botar aqui marcava tudo ✅ à toa (07/07).
 _NAO_PRECISA_TITULO = (
-    "mao de obra", "salario", "13", "ferias", "rescis", "pro-labore", "pro labore",
+    "salario", "13", "ferias", "rescis", "pro-labore", "pro labore",
     "pessoal", "folha", "fgts", "inss", "gps", "pensao", "adiantamento",
     "tarifa", "taxas de cartao", "adquirente", "outras despesas financeiras",
     "juros", "iof", "aplicac", "resgate", "rendiment",

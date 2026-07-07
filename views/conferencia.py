@@ -14,6 +14,7 @@ títulos novos (dedup por linha_hash) e não desfaz vínculos já feitos.
 """
 from __future__ import annotations
 
+from collections import Counter
 from datetime import date, timedelta
 
 import io
@@ -72,16 +73,34 @@ with st.expander("📤 Atualizar Contas a Pagar (subir a planilha *A Pagar Geral
             st.stop()
         st.success(f"**{len(titulos)}** títulos lidos · "
                    f"total previsto **{brl(sum(t['valor'] for t in titulos))}**.")
-        # dedup: só insere os que ainda não existem (por linha_hash).
-        hashes = [t["linha_hash"] for t in titulos]
-        existentes = set()
-        for i in range(0, len(hashes), 500):
-            lote = hashes[i:i + 500]
-            ph = ",".join("?" * len(lote))
-            existentes |= {r["linha_hash"] for r in
-                           query(f"SELECT linha_hash FROM titulos WHERE linha_hash IN ({ph})",
-                                 tuple(lote))}
-        novos = [t for t in titulos if t["linha_hash"] not in existentes]
+        # dedup por MULTISET de linha_hash (robusto a títulos legítimos idênticos:
+        # dois boletos do mesmo fornecedor, mesmo valor, mesmo vencimento e sem
+        # documento geram o MESMO hash — igual às parcelas de consórcio em lancamentos).
+        # Conta quantas ocorrências de cada hash-base já existem no banco e só insere a
+        # SOBRA, com sufixo (#2, #3) pra respeitar o índice UNIQUE. Sem isso, o
+        # executemany estourava UniqueViolation quando o arquivo trazia hashes iguais.
+        def _base(h: str) -> str:
+            return h.split("#", 1)[0]
+
+        existentes_raw = {r["linha_hash"] for r in query(
+            "SELECT linha_hash FROM titulos WHERE linha_hash IS NOT NULL")}
+        db_counts = Counter(_base(h) for h in existentes_raw)
+        usados = set(existentes_raw)
+
+        vistos: Counter = Counter()
+        novos: list[tuple[dict, str]] = []  # (título, linha_hash único)
+        for t in titulos:
+            b = t["linha_hash"]
+            vistos[b] += 1
+            if vistos[b] <= db_counts.get(b, 0):
+                continue  # essa ocorrência já está no banco
+            h = b
+            k = 1
+            while h in usados:
+                k += 1
+                h = f"{b}#{k}"
+            usados.add(h)
+            novos.append((t, h))
         st.caption(f"{len(novos)} novo(s) · {len(titulos) - len(novos)} já estavam cadastrados.")
         if novos and st.button(f"✅ Cadastrar {len(novos)} título(s) novos", type="primary"):
             executemany(
@@ -91,7 +110,7 @@ with st.expander("📤 Atualizar Contas a Pagar (subir a planilha *A Pagar Geral
                 [(emp_por_apelido.get(t["empresa"]), "pagar",
                   (t["historico"] or t["fornecedor"])[:200], t["fornecedor"], t["valor"],
                   t["vencimento"], t["documento"], t["tipo_docto"], t["loja"],
-                  "argos", "aberto", t["linha_hash"]) for t in novos])
+                  "argos", "aberto", h) for t, h in novos])
             st.success(f"Cadastrados {len(novos)} títulos. Confira abaixo.")
             st.rerun()
 

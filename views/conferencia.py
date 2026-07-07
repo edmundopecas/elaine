@@ -32,29 +32,11 @@ def brl(v) -> str:
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-# Categorias que, por natureza, NÃO têm título no Contas a Pagar (folha paga por
-# funcionário, taxas, tarifas, aplicação/resgate, transferência, tributo, etc.).
-# Uma saída dessas na lista "sem título" é ESPERADA — não precisa vincular.
-# ATENÇÃO: NÃO incluir "mão de obra" — as categorias "... - Mão de Obra" (Forene,
-# Edmundo, Rio Largo) são OBRA/serviço de terceiro (empreiteiro, pedreiro), que DEVE
-# ter título no CPR; não é folha em bloco. Botar aqui marcava tudo ✅ à toa (07/07).
-_NAO_PRECISA_TITULO = (
-    "salario", "13", "ferias", "rescis", "pro-labore", "pro labore",
-    "pessoal", "folha", "fgts", "inss", "gps", "pensao", "adiantamento",
-    "tarifa", "taxas de cartao", "adquirente", "outras despesas financeiras",
-    "juros", "iof", "aplicac", "resgate", "rendiment",
-    "transferencia entre empresas", "consorcio", "emprestimo", "financiamento",
-    "devolu", "icms", "tributo", "imposto", "fecoep", "plano de saude", "seguro",
-)
-
-
-def _precisa_titulo(categoria) -> bool:
-    """True = pagamento que DEVERIA ter um título no CPR (revisar); False = folha/
-    taxa/interno (esperado não ter título). Sem categoria também vira 'revisar'."""
-    if not categoria or categoria in ("—", "A classificar"):
-        return True
-    n = _norm(categoria)
-    return not any(k in n for k in _NAO_PRECISA_TITULO)
+# REGRA (pedido do Filipe, 07/07/2026): "✅ está no CPR" SÓ quando a saída casa de
+# verdade com um título (nome+valor) OU já tem baixa. TUDO que não casou = "❌ não
+# está no CPR" — sem lista de exceção por categoria. A tela é uma conferência crua do
+# que está e do que não está; nada é marcado "✅" por dedução de categoria (isso
+# mentia "sim" pra tarifa/devolução/folha que não passam no CPR e quebrava a confiança).
 
 
 st.title("⚖️ Conferência — Contas a Pagar × Pagamentos")
@@ -231,40 +213,39 @@ k[2].metric("↔️ Diferença", brl(tot_dif), delta_color="off",
 
 # ─── TODAS AS SAÍDAS (fora aplicações), com flag "está no CPR?" ──────────────
 # Mostra TODA saída (menos aplicação/transferência interna) e marca "No CPR?".
-# A cobertura agora vem do casamento REAL do motor `casar` (nome + valor), NÃO da
-# contagem por valor: a saída só é ✅ quando um título de mesmo valor E nome/categoria
-# bateu com ela (ou já foi baixada, ou é folha/taxa/tributo/interno — que o CPR lança
-# em bloco, não por item). Assim o R$780 do Roberto Moura não volta a mentir "✅".
+# ✅ SÓ quando a saída CASOU de verdade com um título (nome+valor) OU já tem baixa.
+# Tudo que não casou = ❌ não está — SEM exceção por categoria (pedido do Filipe):
+# a tela é conferência crua do que está e do que não está; nada de "✅" por dedução.
 sem_titulo_ids = {s["id"] for s in res["saidas_sem_titulo"]}
 cobertos_ids = ({s["id"] for s in saidas_livres if s["id"] not in sem_titulo_ids}
                 | usadas_baixa)
 
 linhas_saidas = []
 for s in sorted(saidas_reais, key=lambda x: -x["valor"]):
-    coberto = (s["id"] in cobertos_ids) or not _precisa_titulo(s["plano"])
+    coberto = s["id"] in cobertos_ids
     linhas_saidas.append({
         "_ok": coberto,
         "Data": pd.to_datetime(s["data"]).strftime("%d/%m/%Y"),
         "Empresa": s["empresa_apelido"], "Valor": s["valor"],
         "Fornecedor/Contraparte": s["contraparte"] or s["descricao"],
         "Categoria": s["plano"],
-        "No CPR?": "✅ sim" if coberto else "❌ NÃO — lançar"})
+        "No CPR?": "✅ está" if coberto else "❌ NÃO está"})
 
 st.divider()
 n_fora = sum(1 for r in linhas_saidas if not r["_ok"])
 v_fora = sum(r["Valor"] for r in linhas_saidas if not r["_ok"])
 st.subheader("🧾 Todas as saídas do período (fora aplicações)")
 mc = st.columns(3)
-mc[0].metric("❌ Fora do CPR — pra lançar", brl(v_fora), f"{n_fora} saídas",
+mc[0].metric("❌ NÃO está no CPR", brl(v_fora), f"{n_fora} saídas",
              delta_color="off")
-mc[1].metric("✅ Já no CPR", brl(tot_pago - v_fora), f"{len(linhas_saidas) - n_fora} saídas",
+mc[1].metric("✅ Está no CPR", brl(tot_pago - v_fora), f"{len(linhas_saidas) - n_fora} saídas",
              delta_color="off")
 mc[2].metric("💸 Total (fora aplicações)", brl(tot_pago), f"{len(linhas_saidas)} saídas",
              delta_color="off")
 st.caption("Toda saída que saiu das contas (menos aplicação/transferência interna). "
-           "**No CPR?**: ✅ = casou com um título por **nome+valor** (ou é folha/taxa/"
-           "interno, que o CPR lança em bloco). Os **❌ NÃO** são os que faltam lançar — "
-           "ficam no topo.")
+           "**No CPR?**: ✅ **está** = casou com um título do CPR por **nome + valor** "
+           "(ou já foi conferida). **❌ NÃO está** = não achei título pra ela — é o que "
+           "falta lançar/conferir. Ficam no topo.")
 saidas_df = (pd.DataFrame(linhas_saidas)
              .sort_values(["_ok", "Valor"], ascending=[True, False])
              .drop(columns=["_ok"]))

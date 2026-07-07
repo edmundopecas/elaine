@@ -208,54 +208,18 @@ k[2].metric("↔️ Diferença", brl(tot_dif), delta_color="off",
                  "(parte não paga, ou já lançada como dinheiro).")
 
 # ─── TODAS AS SAÍDAS (fora aplicações), com flag "está no CPR?" ──────────────
-# NÃO esconde nada: mostra toda saída (menos aplicação/transferência interna). A
-# coluna "No CPR?" só MARCA se existe um título de mesmo valor no CPR (multiset:
-# a Nª saída de um valor só é 'sim' se o CPR tem N títulos daquele valor). Assim
-# você vê tudo e identifica na hora o que falta lançar (os ❌).
-# "Está no CPR?" por CONTAGEM DE VALOR: se o CPR tem N títulos de um valor e há N (ou
-# menos) saídas desse valor → todas "sim". Só quando há MAIS saídas que títulos daquele
-# valor é que uso nome/categoria pra escolher qual saída fica coberta (ex.: R$420 com 2
-# saídas e 1 título → o SO AL PNEUS fica 'sim', a devolução de mesmo valor 'não').
-# Folha/pessoal conta como 'sim' sempre (o CPR lança folha em bloco, não por item).
-from collections import Counter, defaultdict
-cpr_cnt = Counter(round(t["valor"], 2) for t in titulos_db)
-titulos_por_valor: dict = defaultdict(list)
-for t in titulos_db:
-    titulos_por_valor[round(t["valor"], 2)].append(t)
-saidas_por_valor: dict = defaultdict(list)
-for s in saidas_reais:
-    saidas_por_valor[round(s["valor"], 2)].append(s)
-cpr_buckets = {bucket_categoria(t["tipo_docto"] or "") for t in titulos_db}
-folha_no_cpr = "Folha e Pessoal" in cpr_buckets
-
-
-def _score(s, tits) -> float:
-    sb = bucket_categoria(s["plano"] or "")
-    melhor = 0.0
-    for t in tits:
-        sim = similaridade(t["contraparte"] or "", s["contraparte"] or s["descricao"] or "")
-        tb = bucket_categoria(t["tipo_docto"] or "")
-        if tb != "Outros / Administrativo" and tb == sb:
-            sim = max(sim, 0.65)          # categoria bate = bom candidato
-        melhor = max(melhor, sim)
-    return melhor
-
-
-cobertos_ids: set = set()
-for v, ss in saidas_por_valor.items():
-    n_tit = cpr_cnt.get(v, 0)
-    if n_tit == 0:
-        continue
-    if len(ss) <= n_tit:
-        cobertos_ids.update(s["id"] for s in ss)          # todas cobertas
-    else:                                                  # mais saídas que títulos
-        ranked = sorted(ss, key=lambda s: _score(s, titulos_por_valor[v]), reverse=True)
-        cobertos_ids.update(s["id"] for s in ranked[:n_tit])
+# Mostra TODA saída (menos aplicação/transferência interna) e marca "No CPR?".
+# A cobertura agora vem do casamento REAL do motor `casar` (nome + valor), NÃO da
+# contagem por valor: a saída só é ✅ quando um título de mesmo valor E nome/categoria
+# bateu com ela (ou já foi baixada, ou é folha/taxa/tributo/interno — que o CPR lança
+# em bloco, não por item). Assim o R$780 do Roberto Moura não volta a mentir "✅".
+sem_titulo_ids = {s["id"] for s in res["saidas_sem_titulo"]}
+cobertos_ids = ({s["id"] for s in saidas_livres if s["id"] not in sem_titulo_ids}
+                | usadas_baixa)
 
 linhas_saidas = []
 for s in sorted(saidas_reais, key=lambda x: -x["valor"]):
-    eh_folha = folha_no_cpr and bucket_categoria(s["plano"] or "") == "Folha e Pessoal"
-    coberto = (s["id"] in cobertos_ids) or eh_folha
+    coberto = (s["id"] in cobertos_ids) or not _precisa_titulo(s["plano"])
     linhas_saidas.append({
         "_ok": coberto,
         "Data": pd.to_datetime(s["data"]).strftime("%d/%m/%Y"),
@@ -276,8 +240,9 @@ mc[1].metric("✅ Já no CPR", brl(tot_pago - v_fora), f"{len(linhas_saidas) - n
 mc[2].metric("💸 Total (fora aplicações)", brl(tot_pago), f"{len(linhas_saidas)} saídas",
              delta_color="off")
 st.caption("Toda saída que saiu das contas (menos aplicação/transferência interna). "
-           "**No CPR?**: ✅ = tem título de mesmo valor **ou** é folha/pessoal (que o CPR "
-           "lança em bloco). Os **❌ NÃO** são os que faltam lançar — ficam no topo.")
+           "**No CPR?**: ✅ = casou com um título por **nome+valor** (ou é folha/taxa/"
+           "interno, que o CPR lança em bloco). Os **❌ NÃO** são os que faltam lançar — "
+           "ficam no topo.")
 saidas_df = (pd.DataFrame(linhas_saidas)
              .sort_values(["_ok", "Valor"], ascending=[True, False])
              .drop(columns=["_ok"]))
@@ -304,12 +269,48 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 st.divider()
-# ─── Detalhe título-a-título (OPCIONAL) — escondido, só se quiser drilar ──────
-with st.expander("🔎 Detalhe: conferir título por título (opcional)"):
-    st.caption("🟢 casou (por nome+valor, ou por categoria+valor — ex.: folha) · "
-               "🔴 sem pagamento no CPR. Ajuste a coluna **Pagamento** e salve.")
+# ─── Detalhe título-a-título — ligar o pagamento a cada título (conciliar) ────
+with st.expander("🔎 Conferir título por título / conciliar (ligar pagamento)"):
+    st.caption("🟢 casou (nome+valor, ou categoria+valor — ex.: folha) · 🟡 só valor · "
+               "🔴 sem pagamento. Nos 🔴, abra a coluna **Pagamento**, escolha a saída que "
+               "quitou o título e salve — a baixa fica gravada. Os 🔴 ficam no topo.")
+
+    def _ordem(status: str) -> int:
+        if status.startswith("🔴"):
+            return 0
+        if status.startswith("🟡"):
+            return 1
+        if "conferido" in status:
+            return 3
+        return 2                          # 🟢 sugerido (casado) — confirmar
+
+    df_ord = (df.assign(_o=df["Status"].map(_ordem))
+                .sort_values(["_o", "Previsto"], ascending=[True, False])
+                .drop(columns=["_o"]))
+
+    # Filtro por status: ver um grupo de cada vez (só 🔴, só 🟢 casados, etc.).
+    _preds = {
+        "🔴 Sem pagamento": lambda s: s.startswith("🔴"),
+        "🟡 Só valor (rever)": lambda s: s.startswith("🟡"),
+        "🟢 Casados (sugeridos)": lambda s: s.startswith("🟢") and "casado" in s,
+        "🟢 Já conferidos": lambda s: "conferido" in s,
+    }
+    _cont = {rot: int(df_ord["Status"].map(pred).sum()) for rot, pred in _preds.items()}
+    # Rótulos do filtro SEM a contagem — se o número entrasse no texto, a opção mudaria
+    # a cada salvamento e o st.radio perderia a seleção (voltava pra "Todos"). A contagem
+    # fica numa legenda embaixo; assim o filtro continua no 🔴 depois de salvar.
+    rot_sel = st.radio("Ver", ["Todos", *_preds.keys()], horizontal=True, key="conf_filtro")
+    st.caption("  ·  ".join([f"Todos: **{len(df_ord)}**"]
+                            + [f"{rot}: **{_cont[rot]}**" for rot in _preds]))
+    df_view = df_ord if rot_sel == "Todos" else df_ord[df_ord["Status"].map(_preds[rot_sel])]
+
+    if df_view.empty:
+        st.info("Nenhum título nesse filtro.")
+        st.stop()
+
     editado = st.data_editor(
-        df, hide_index=True, use_container_width=True, key="conf_editor",
+        df_view, hide_index=True, use_container_width=True,
+        key=f"conf_editor_{rot_sel}",
         column_config={
             "_tid": None,
             "Status": st.column_config.TextColumn(disabled=True, width="small"),
@@ -324,7 +325,17 @@ with st.expander("🔎 Detalhe: conferir título por título (opcional)"):
         },
     )
 
-    if st.button("💾 Salvar vínculos", type="primary"):
+    # Feedback ao vivo: a coluna Status é calculada no load e SÓ muda depois de salvar.
+    # Aqui conta quantos títulos já têm um pagamento escolhido mas ainda não gravado,
+    # pra não parecer que "atrelar o pagamento não fez nada".
+    prontos = sum(1 for _, r in editado.iterrows()
+                  if id_por_rotulo.get(r["Pagamento"]) and "conferido" not in r["Status"])
+    if prontos:
+        st.info(f"🔗 **{prontos}** título(s) com pagamento escolhido, aguardando salvar. "
+                "A bolinha só vira 🟢 (e o título sai da lista dos 🔴) **depois** que você "
+                "clicar em salvar.")
+
+    if st.button("💾 Salvar conciliação", type="primary"):
         novos_vinc = {}   # tid -> saida_id (ou None)
         for _, r in editado.iterrows():
             novos_vinc[r["_tid"]] = id_por_rotulo.get(r["Pagamento"])
@@ -348,6 +359,6 @@ with st.expander("🔎 Detalhe: conferir título por título (opcional)"):
                 execute("UPDATE titulos SET lancamento_id=NULL, status='aberto', "
                         "data_baixa=NULL WHERE id=?", (tid,))
                 n_desl += 1
-        st.success(f"Salvo! {n_lig} vínculo(s) novo(s)"
-                   + (f" · {n_desl} desfeito(s)" if n_desl else "") + ".")
+        st.success(f"Conciliado! {n_lig} baixa(s) nova(s)"
+                   + (f" · {n_desl} desfeita(s)" if n_desl else "") + ".")
         st.rerun()

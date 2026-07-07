@@ -74,27 +74,62 @@ if IS_PG:
         # % é literal no nosso SQL (LIKE '%x%'); escapa antes de trocar ? -> %s
         return sql.replace("%", "%%").replace("?", "%s")
 
-    def query(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
-        conn = _pg()
+    # A conexão é persistente e o pooler de transação do Supabase (porta 6543)
+    # derruba conexões ociosas: a PRÓXIMA query cai numa conexão morta e estoura
+    # InterfaceError('connection already closed') / OperationalError. O `_pg()` só
+    # reabre quando `.closed` já está setado — mas o cliente muitas vezes só descobre
+    # que morreu ao TENTAR usar. Então: em erro de conexão, descarta a conexão e
+    # tenta de novo UMA vez com uma conexão nova (auto-cura, sem tela de erro).
+    _CONN_MORTA = (psycopg2.InterfaceError, psycopg2.OperationalError)
+
+    def _rollback_seguro(conn) -> None:
         try:
+            conn.rollback()
+        except Exception:
+            pass                         # conexão já morta: nada a desfazer
+
+    def _descartar_conn(conn) -> None:
+        global _conn
+        try:
+            conn.close()
+        except Exception:
+            pass
+        _conn = None                     # força _pg() a abrir uma nova
+
+    def _rodar(fn):
+        """Executa fn(conn); em erro de conexão morta, reabre e tenta 1x mais."""
+        ultimo = None
+        for tentativa in (1, 2):
+            conn = _pg()
+            try:
+                return fn(conn)
+            except Exception as e:
+                _rollback_seguro(conn)
+                if tentativa == 1 and isinstance(e, _CONN_MORTA):
+                    _descartar_conn(conn)
+                    ultimo = e
+                    continue
+                raise
+        raise ultimo                     # inalcançável, mas explícito
+
+    def query(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
+        def _q(conn):
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(_tr(sql), params)
                 rows = [dict(r) for r in cur.fetchall()]
             conn.commit()
             return rows
-        except Exception:
-            conn.rollback()
-            raise
+        return _rodar(_q)
 
     def query_one(sql: str, params: tuple = ()) -> dict[str, Any] | None:
         rows = query(sql, params)
         return rows[0] if rows else None
 
     def execute(sql: str, params: tuple = ()) -> int:
-        conn = _pg()
         s = sql.lstrip()
         is_insert = s[:6].upper() == "INSERT"
-        try:
+
+        def _e(conn):
             with conn.cursor() as cur:
                 if is_insert and "returning" not in s.lower():
                     cur.execute(_tr(sql) + " RETURNING id", params)
@@ -105,21 +140,16 @@ if IS_PG:
                 rc = cur.rowcount
                 conn.commit()
                 return rc
-        except Exception:
-            conn.rollback()
-            raise
+        return _rodar(_e)
 
     def executemany(sql: str, seq: list[tuple]) -> int:
-        conn = _pg()
-        try:
+        def _em(conn):
             with conn.cursor() as cur:
                 cur.executemany(_tr(sql), seq)
                 rc = cur.rowcount
             conn.commit()
             return rc
-        except Exception:
-            conn.rollback()
-            raise
+        return _rodar(_em)
 
     def init_db() -> None:
         """Cria o schema 'elaine' (idempotente) e semeia se vazio.

@@ -57,7 +57,13 @@ CMV = query_one("SELECT id FROM plano_contas WHERE nome LIKE '%Mercadoria%' "
 CMV_ID = CMV["id"] if CMV else None
 
 empresas = query("SELECT id, apelido FROM empresas WHERE ativa=1 ORDER BY apelido")
-contas = {c["empresa_id"]: c["id"] for c in query("SELECT id, empresa_id FROM contas_bancarias")}
+# Conta de fallback por empresa: a do Safra (é de lá que vêm os boletos DDA). Sem o
+# ORDER BY, a empresa ficava com a ÚLTIMA conta que o banco devolvesse — a ordem muda
+# quando contas_bancarias sofre UPDATE, e os boletos caíam no Itaú/Santander.
+contas: dict[int, int] = {}
+for c in query("SELECT id, empresa_id, banco FROM contas_bancarias "
+               "ORDER BY (CASE WHEN banco LIKE 'Safra%' THEN 0 ELSE 1 END), id"):
+    contas.setdefault(c["empresa_id"], c["id"])
 
 arquivo = st.file_uploader("Relatório Por Pagamentos (.xlsx)", type=["xlsx", "xls"])
 if not arquivo:
@@ -156,6 +162,12 @@ if st.button(f"✅ Detalhar {len(a_processar)} dia(s) no sistema", type="primary
     total_inseridos = 0
     for r in a_processar:
         dia = r["_dia"]
+        # os boletos herdam a conta da linha somada que estão substituindo
+        somada = query_one(
+            "SELECT conta_bancaria_id c FROM lancamentos WHERE empresa_id=? AND data=? "
+            "AND origem='extrato' AND UPPER(descricao) LIKE '%BOLETO DDA%' "
+            "ORDER BY conta_bancaria_id LIMIT 1", (emp_id, dia))
+        conta_do_dia = somada["c"] if somada else conta_id
         # apaga a(s) linha(s) somada(s) do extrato daquele dia
         execute("DELETE FROM lancamentos WHERE empresa_id=? AND data=? AND origem='extrato' "
                 "AND UPPER(descricao) LIKE '%BOLETO DDA%'", (emp_id, dia))
@@ -172,7 +184,7 @@ if st.button(f"✅ Detalhar {len(a_processar)} dia(s) no sistema", type="primary
                 "contraparte, cnpj_contraparte, documento, valor, tipo, plano_conta_id, "
                 "classificado, origem, linha_hash, observacao) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (emp_id, conta_id, dia, f"BOLETO DDA - {fav}", fav, _digitos(b.get(c_cnpj)),
+                (emp_id, conta_do_dia, dia, f"BOLETO DDA - {fav}", fav, _digitos(b.get(c_cnpj)),
                  (str(b.get(c_doc)).strip() if c_doc else None) or None, float(b["_valor"]), "saida",
                  pid, 1, "dda-detalhe", h,
                  "Detalhe do pagamento DDA (relatório Safra Por Pagamentos)"))

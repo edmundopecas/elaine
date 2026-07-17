@@ -18,3 +18,9 @@ venv/
 
 # Logs
 *.log
+
+# Drivers de importação por dia, backups de dados e notas de sessão (local, não vão pro repo)
+_import_*.py
+_*.py
+backup_*.json
+_sessao-*.md

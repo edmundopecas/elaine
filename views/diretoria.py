@@ -110,6 +110,9 @@ prolabore = por_grupo.get("Sócios", 0.0)
 retiradas_socios = prolabore + float(socios_fora)
 # retirada TOTAL dos sócios (pró-labore na DRE + gastos pessoais + saque, fora DRE)
 retirada_socios_total = prolabore + float(socios_fora) + float(saque_socios)
+# só a parte que drena caixa: gastos pessoais + saque (o pró-labore agora
+# conta como parte que MANTÉM a operação, por decisão do Filipe 01/07)
+retirada_socios_fora = float(socios_fora) + float(saque_socios)
 
 if receita == 0 and not cats:
     st.info("Sem dados classificados no período/empresa selecionados.")
@@ -242,22 +245,21 @@ with t3:
         "Despesas com Pessoal": "mantem", "Ocupação": "mantem",
         "Despesas Administrativas": "mantem", "Tributos": "mantem",
         "Deduções": "mantem", "Construção": "mantem",
+        "Sócios": "mantem",  # pró-labore = parte que mantém a operação (decisão Filipe 01/07)
         "Despesas Financeiras": "drena",
     }
     CAT_OVERRIDE = {"Rompimento de Contrato": "drena"}
 
     buckets = {"gera": [], "mantem": [], "drena": []}
     for c in cats:
-        if c["grupo"] == "Sócios":
-            continue  # sócios entram consolidados abaixo (pró-labore + pessoais + saque)
         b = CAT_OVERRIDE.get(c["nome"]) or GRUPO_BUCKET.get(c["grupo"], "mantem")
         buckets[b].append((c["nome"], float(c["v"])))
-    # Retirada COMPLETA dos sócios (não só o pró-labore): pró-labore + gastos
-    # pessoais pagos pela empresa + saque em dinheiro → tudo dreno de caixa.
-    if retirada_socios_total:
+    # Retirada dos sócios que só drena caixa: gastos pessoais pagos pela empresa
+    # + saque em dinheiro (o pró-labore ficou no balde "mantém a operação").
+    if retirada_socios_fora:
         buckets["drena"].append(
-            ("Retirada dos sócios (pró-labore + gastos pessoais + saque)",
-             retirada_socios_total))
+            ("Retirada dos sócios (gastos pessoais + saque)",
+             retirada_socios_fora))
     tot = {b: sum(v for _, v in lst) for b, lst in buckets.items()}
     total_desp = sum(tot.values()) or 1
 
@@ -265,7 +267,7 @@ with t3:
         ("gera", "🟢 Gera receita", VERDE,
          "Investimento: compra o que você revende e traz cliente. Cortar aqui = vender menos."),
         ("mantem", "🔵 Mantém a operação", AZUL,
-         "Necessário pra funcionar: folha, aluguel, energia, impostos, contador. Otimize, não corte."),
+         "Necessário pra funcionar: folha, pró-labore, aluguel, energia, impostos, contador. Otimize, não corte."),
         ("drena", "🔴 Só drena caixa", VERMELHO,
          "Não gera nem sustenta nada: juros, tarifas, multas. É o primeiro alvo de corte/renegociação."),
     ]
@@ -288,7 +290,7 @@ with t3:
             f"<div style='background:{VERMELHO};color:#F3EFE5;padding:14px 18px;border-radius:10px'>"
             f"🎯 <b>{brl(tot['drena'])}</b> saíram do caixa sem gerar nem sustentar venda. "
             f"Os juros e tarifas do banco dá pra <b>renegociar</b>; a retirada dos sócios "
-            f"(<b>{brl(retirada_socios_total)}</b>) dá pra <b>planejar</b>. É o primeiro "
+            f"(<b>{brl(retirada_socios_fora)}</b>) dá pra <b>planejar</b>. É o primeiro "
             f"lugar pra olhar quando o caixa apertar.</div>", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -121,7 +121,7 @@ def _bucket(nome: str) -> str:
         return "Aplicações (dinheiro parado, ainda seu)"
     if nome == "Transferência entre Empresas":
         return "Transferências entre contas do grupo"
-    if nome.startswith("Pessoal - "):
+    if nome.startswith("Pessoal - ") or nome == "Pró-labore":
         return "Gastos particulares dos sócios"
     return "Consórcio / empréstimos / saque / outros"
 

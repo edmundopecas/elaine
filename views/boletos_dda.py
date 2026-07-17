@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+from collections import Counter
 
 import pandas as pd
 import streamlit as st
@@ -123,12 +124,19 @@ st.success(f"**{len(df)}** boletos DDA pagos · **{df['_valor'].sum():,.2f}** no
 linhas = []
 for dia, g in df.groupby("_dia"):
     plan = g["_valor"].sum()
-    ja = query_one("SELECT COUNT(*) n FROM lancamentos WHERE empresa_id=? AND data=? "
-                   "AND origem='dda-detalhe'", (emp_id, dia))["n"]
+    det = query_one("SELECT COUNT(*) n, COALESCE(SUM(valor),0) v FROM lancamentos "
+                    "WHERE empresa_id=? AND data=? AND origem='dda-detalhe'", (emp_id, dia))
+    ja, ja_valor = det["n"], float(det["v"])
     somado = query_one(
         "SELECT COALESCE(SUM(valor),0) v FROM lancamentos WHERE empresa_id=? AND data=? "
         "AND origem='extrato' AND UPPER(descricao) LIKE '%BOLETO DDA%'", (emp_id, dia))["v"]
-    if ja:
+    if ja and plan - ja_valor > 0.01:
+        # dia detalhado por um relatório que veio incompleto: dá pra completar,
+        # o insert pula por linha_hash o que já está lá (não duplica)
+        status = f"🔧 incompleto — faltam R$ {plan - ja_valor:,.2f}"
+    elif ja and ja_valor - plan > 0.01:
+        status = f"⚠️ sistema tem R$ {ja_valor - plan:,.2f} a mais que o relatório"
+    elif ja:
         status = "✅ já detalhado"
     elif somado == 0:
         status = "⚠️ sem linha no extrato"
@@ -148,7 +156,7 @@ st.dataframe(
     hide_index=True, use_container_width=True)
 
 a_processar = [r for r in linhas if r["Status"] in ("🟢 bate certinho",)
-               or r["Status"].startswith("🟡")]
+               or r["Status"].startswith("🟡") or r["Status"].startswith("🔧")]
 ja_feitos = [r for r in linhas if r["Status"] == "✅ já detalhado"]
 if ja_feitos:
     st.caption(f"{len(ja_feitos)} dia(s) já detalhado(s) serão ignorados (sem duplicar).")
@@ -167,18 +175,45 @@ if st.button(f"✅ Detalhar {len(a_processar)} dia(s) no sistema", type="primary
             "SELECT conta_bancaria_id c FROM lancamentos WHERE empresa_id=? AND data=? "
             "AND origem='extrato' AND UPPER(descricao) LIKE '%BOLETO DDA%' "
             "ORDER BY conta_bancaria_id LIMIT 1", (emp_id, dia))
-        conta_do_dia = somada["c"] if somada else conta_id
+        # dia já detalhado (completando o que faltou): a linha somada não existe mais,
+        # então herda a conta dos boletos que já estão naquele dia
+        detalhado = query_one(
+            "SELECT conta_bancaria_id c FROM lancamentos WHERE empresa_id=? AND data=? "
+            "AND origem='dda-detalhe' ORDER BY id LIMIT 1", (emp_id, dia))
+        if somada:
+            conta_do_dia = somada["c"]
+        elif detalhado:
+            conta_do_dia = detalhado["c"]
+        else:
+            conta_do_dia = conta_id
         # apaga a(s) linha(s) somada(s) do extrato daquele dia
         execute("DELETE FROM lancamentos WHERE empresa_id=? AND data=? AND origem='extrato' "
                 "AND UPPER(descricao) LIKE '%BOLETO DDA%'", (emp_id, dia))
+
+        # Dedup por MULTISET, não por hash: o mesmo fornecedor pode ter dois boletos
+        # iguais no mesmo dia (docs diferentes), e a Matriz e a Filial podem pagar o
+        # mesmo boleto — nesses casos um hash (dia|cnpj|favorecido|valor) colide e o
+        # boleto legítimo some. Aqui conta-se quantos de cada (favorecido, valor) já
+        # existem no dia e insere-se só o excedente.
+        ja_no_dia = Counter(
+            (str(x["contraparte"]).strip(), round(float(x["valor"]), 2))
+            for x in query("SELECT contraparte, valor FROM lancamentos WHERE empresa_id=? "
+                           "AND data=? AND origem='dda-detalhe'", (emp_id, dia)))
+        visto = Counter()
+
         for _, b in df[df["_dia"] == dia].iterrows():
             fav = str(b[c_fav]).strip()
+            chave = (fav, round(float(b["_valor"]), 2))
+            visto[chave] += 1
+            if visto[chave] <= ja_no_dia[chave]:
+                continue  # essa ocorrência já está no banco
             regra = classificar_movimento(fav, "saida", emp_id, regras)
             pid = regra["plano_conta_id"] if regra else CMV_ID
-            h = hashlib.sha256(f"dda-detalhe|{dia}|{b.get(c_cnpj)}|{fav}|{b['_valor']:.2f}"
-                               .encode()).hexdigest()
-            if query_one("SELECT 1 FROM lancamentos WHERE linha_hash=?", (h,)):
-                continue
+            # ordinal na chave = boletos idênticos não colidem; empresa = Matriz e Filial
+            # não colidem entre si
+            h = hashlib.sha256(
+                f"dda-detalhe|{emp_id}|{dia}|{b.get(c_cnpj)}|{fav}|{b['_valor']:.2f}"
+                f"|#{visto[chave]}".encode()).hexdigest()
             execute(
                 "INSERT INTO lancamentos (empresa_id, conta_bancaria_id, data, descricao, "
                 "contraparte, cnpj_contraparte, documento, valor, tipo, plano_conta_id, "

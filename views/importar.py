@@ -12,6 +12,7 @@ import streamlit as st
 from classificador import (aprender_regra, classificar_movimento,
                            empresa_do_grupo_por_cnpj,
                            id_categoria_transferencia_interna,
+                           parear_transferencias_proprias,
                            reclassificar_pendentes, regras_ativas)
 from db import execute, query, query_one
 from dedup import planejar_insercao
@@ -240,9 +241,17 @@ if arquivo:
         execute("UPDATE importacoes SET linhas_importadas=?, linhas_duplicadas=? WHERE id=?",
                 (len(a_inserir), duplicados, imp_id))
         auto = reclassificar_pendentes() if aprendidos else 0
+        # Sempre depois de gravar: a empresa mandando dinheiro de uma conta dela pra
+        # outra só dá pra reconhecer quando as DUAS pernas já estão na base (a saída
+        # pode vir de outro arquivo, importado depois) — por isso roda aqui, no fim,
+        # e não na pré-classificação movimento a movimento.
+        proprias = parear_transferencias_proprias()
         msg = f"Importado! {len(a_inserir)} novos · {duplicados} duplicados (ignorados)."
         if aprendidos:
             msg += f" Aprendi {aprendidos} categoria(s)" + (
                 f" e reclassifiquei {auto} pendente(s)." if auto else ".")
+        if proprias:
+            msg += (f" 🔁 {proprias} transferência(s) entre contas da mesma empresa "
+                    "tirada(s) da DRE (achei o par do outro lado).")
         st.success(msg)
         st.rerun()

@@ -168,3 +168,65 @@ def reclassificar_pendentes() -> int:
             aplicar_regra_no_lancamento(lanc["id"], regra)
             n += 1
     return n
+
+
+def parear_transferencias_proprias() -> int:
+    """Acha entrada que é a EMPRESA mandando dinheiro de uma conta dela pra outra
+    e tira da DRE (vira 'Transferência entre Empresas').
+
+    Por que existe (17/07/2026): o `empresa_do_grupo_por_cnpj` só marca interna
+    quando o CNPJ é de OUTRA empresa do grupo (`interna["id"] != emp_id`). Quando a
+    empresa manda pra ELA MESMA (ex.: Supernova tirando R$30k do gateway Asaas e
+    jogando na BB dela), o CNPJ é o dela própria, escapa da detecção e cai nas
+    regras de-para — a regra 180 ('RECEBI' → Receita de Aluguel) pegou 2 desses e
+    inflou a receita em R$60k. O cliente já virou receita quando pagou no Asaas;
+    contar de novo na BB é receita dobrada.
+
+    POR QUE NÃO BASTA "CNPJ igual ao da empresa" (medido nos dados, não chutado):
+    317 lançamentos têm cnpj_contraparte == CNPJ da própria empresa, mas **304 são
+    VENDA DE VERDADE** — PIX de cliente no QR code, onde o banco carimba o CNPJ de
+    QUEM RECEBE (a própria loja), não o do pagador (c10: 166 lanç. R$52,7k · c9: 123
+    lanç. R$26,1k, média R$213, mínimo R$2,54 · c13 Rosilene: 15). Marcar todo mundo
+    como transferência jogaria ~R$82k de receita real pra fora da DRE.
+
+    Por isso exige PROVA DE PAR: entrada com CNPJ da própria empresa **E** uma saída
+    de mesmo valor, mesmo dia, na MESMA empresa, em conta DIFERENTE. Testado sobre a
+    base inteira: de 315 candidatos pega 8 — 6 já eram transferência (classificadas
+    à mão pelo Filipe) e 2 eram os R$30k errados. Zero falso positivo nas 304 vendas.
+
+    NÃO mexe no que o Filipe classificou à mão (regra_id IS NULL e classificado=1) —
+    só corrige o que veio de regra ou está pendente. Idempotente: rodar de novo não
+    muda nada (o que já é 'transferencia' é ignorado).
+
+    Returns:
+        Quantos lançamentos foram reclassificados.
+    """
+    cat = id_categoria_transferencia_interna()
+    if not cat:
+        return 0
+    candidatos = query(
+        "SELECT l.id, l.data, l.valor, l.conta_bancaria_id, l.empresa_id, l.regra_id, "
+        "       l.classificado, p.tipo AS plano_tipo "
+        "FROM lancamentos l "
+        "JOIN contas_bancarias c ON c.id = l.conta_bancaria_id "
+        "JOIN empresas e ON e.id = c.empresa_id "
+        "LEFT JOIN plano_contas p ON p.id = l.plano_conta_id "
+        "WHERE l.tipo = 'entrada' AND l.cnpj_contraparte = e.cnpj"
+    )
+    n = 0
+    for l in candidatos:
+        if (l["plano_tipo"] or "") == "transferencia":
+            continue                                    # já está fora da DRE
+        if l["regra_id"] is None and l["classificado"] == 1:
+            continue                                    # classificação manual do Filipe: não tocar
+        par = query_one(
+            "SELECT id FROM lancamentos WHERE tipo='saida' AND data=? AND valor=? "
+            "AND empresa_id=? AND conta_bancaria_id<>? LIMIT 1",
+            (l["data"], l["valor"], l["empresa_id"], l["conta_bancaria_id"]),
+        )
+        if not par:
+            continue                                    # sem par = é venda mesmo, não mexe
+        execute("UPDATE lancamentos SET plano_conta_id=?, regra_id=NULL, classificado=1 "
+                "WHERE id=?", (cat, l["id"]))
+        n += 1
+    return n

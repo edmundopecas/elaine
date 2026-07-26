@@ -18,6 +18,7 @@ from db import execute, query, query_one
 from dedup import planejar_insercao
 from parsers import (conta_do_arquivo, contas_conferem, detectar_banco_xlsx,
                      hash_arquivo, parse_extrato)
+from saldo_extrato import conferir, ler_saldos, registrar, tem_ancora
 
 # Históricos que são só dinheiro indo/voltando de conta rendimento (não é gasto):
 MECANICOS_APLICACAO = ("rende facil", "conta remunerada", "na conta corrente")
@@ -100,6 +101,32 @@ if arquivo:
         else:
             st.caption("ℹ️ Não consegui confirmar a conta pelo arquivo — "
                        "confira que escolheu a conta certa antes de gravar.")
+
+    # ── Trava de EMENDA DE SALDO ─────────────────────────────────────────────
+    # O saldo com que este extrato ABRE tem que ser o mesmo com que o anterior
+    # FECHOU. Se não for, o banco lançou movimento depois que aquele arquivo foi
+    # gerado (baixar o extrato à noite some com o que processa de madrugada —
+    # foi assim que sumiram R$ 287 mil de saídas em julho/2026).
+    saldos = ler_saldos(file_bytes, arquivo.name) if conta_id else None
+    if saldos:
+        alertas_saldo = conferir(conta_id, saldos, movimentos)
+        for alerta in alertas_saldo:
+            st.warning(f"⚠️ {alerta}")
+        if not alertas_saldo:
+            # ⚠️ só dizer ✅ quando a emenda foi REALMENTE conferida contra um
+            # extrato anterior. Sem âncora (1º extrato da conta) ou sem SALDO
+            # TOTAL, o certo é dizer que não deu pra conferir — nunca um ✅ verde
+            # que não foi verificado.
+            if saldos["saldo_total"] is None:
+                st.caption("ℹ️ Este extrato não traz SALDO TOTAL — não deu pra "
+                           "conferir a emenda com o anterior.")
+            elif not tem_ancora(conta_id, saldos["periodo_ini"]):
+                st.caption("ℹ️ Ainda não tenho extrato anterior desta conta pra "
+                           "comparar — guardei este como referência. A conferência "
+                           "de emenda começa a valer no próximo.")
+            else:
+                st.caption(f"✅ Saldo do extrato ({saldos['periodo_ini']} a "
+                           f"{saldos['periodo_fim']}) emenda com o anterior.")
 
     # ── Pré-classificação (preview, antes de gravar) ─────────────────────────
     #  1) transferência interna se o CNPJ da contraparte é de OUTRA empresa;
@@ -238,6 +265,7 @@ if arquivo:
                     aprender_regra(chave, pid, m["tipo"])
                     aprendidos += 1
 
+        registrar(conta_id, saldos)   # âncora pra emenda do próximo extrato
         execute("UPDATE importacoes SET linhas_importadas=?, linhas_duplicadas=? WHERE id=?",
                 (len(a_inserir), duplicados, imp_id))
         auto = reclassificar_pendentes() if aprendidos else 0

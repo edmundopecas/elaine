@@ -245,8 +245,15 @@ def _eh_tipo_generico(s: str | None) -> bool:
 
 def _eh_linha_de_saldo(texto: str | None) -> bool:
     """Linhas de SALDO (TOTAL/ANTERIOR/DO DIA/INICIAL…) são a marcação do saldo
-    da conta no extrato, não um movimento — não devem virar lançamento."""
-    return _norm(texto).startswith("saldo")
+    da conta no extrato, não um movimento — não devem virar lançamento.
+
+    O Itaú abrevia: "SDO APLIC AUT MAIS AP" é o SALDO da aplicação automática,
+    não um resgate. Entrou como entrada de R$64.541,82 em 24/07/2026 e inflou o
+    saldo da conta 11 — provado comparando os extratos: saldo(d2) = saldo(d1) +
+    aplicado − resgatado fecha ao centavo em todos os intervalos. Os movimentos
+    de verdade são "APL APLIC AUT…" (aplicou) e "RES APLIC AUT…" (resgatou)."""
+    n = _norm(texto)
+    return n.startswith("saldo") or n.startswith("sdo ")
 
 
 def _tag(bloco: str, tag: str) -> str | None:

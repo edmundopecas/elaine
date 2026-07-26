@@ -79,6 +79,21 @@ CREATE TABLE IF NOT EXISTS importacoes (
     criado_em          TEXT NOT NULL DEFAULT (now()::text)
 );
 
+-- Saldo declarado por cada extrato (SALDO INICIAL / SALDO TOTAL do .xls do Safra).
+-- Serve pra conferir a EMENDA: o saldo com que um extrato abre tem que ser o mesmo
+-- com que o anterior fechou. Se não for, o banco lançou algo depois que aquele
+-- arquivo foi gerado — foi assim que sumiram R$ 287 mil de saídas em julho/2026.
+CREATE TABLE IF NOT EXISTS saldos_extrato (
+    id                SERIAL PRIMARY KEY,
+    conta_bancaria_id INTEGER REFERENCES contas_bancarias(id),
+    periodo_ini       TEXT NOT NULL,
+    periodo_fim       TEXT NOT NULL,
+    saldo_inicial     DOUBLE PRECISION,
+    saldo_total       DOUBLE PRECISION,
+    arquivo           TEXT,
+    criado_em         TEXT NOT NULL DEFAULT (now()::text)
+);
+
 -- Lançamentos ----------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS lancamentos (
     id                SERIAL PRIMARY KEY,

@@ -62,11 +62,24 @@ if IS_PG:
         servidor a cada transação — um `SET search_path` roda num servidor e a query
         seguinte cai em outro que voltou ao schema 'public', dando UndefinedTable nas
         tabelas do schema 'elaine'. Como opção de startup, o pooler garante o mesmo
-        search_path em todo servidor que ele entregar."""
+        search_path em todo servidor que ele entregar.
+
+        TIMEOUTS (02/08/2026): sem eles, uma QUEDA DE INTERNET com o app aberto trava
+        a tela PARA SEMPRE ("carregando" eterno). Motivo: quando a rede cai, o servidor
+        não manda FIN/RST — o socket fica meio-aberto e o `recv()` do psycopg2 espera o
+        timeout de retransmissão do Windows (minutos a horas). Sem exceção não há erro,
+        e sem erro o `_rodar()` nunca tenta reconectar. Com `connect_timeout` +
+        keepalives o socket morto vira exceção em ~30-45s → `_rodar()` reconecta sozinho
+        na 2ª tentativa e a tela volta a responder."""
         global _conn
         if _conn is None or _conn.closed:
             _conn = psycopg2.connect(DATABASE_URL,
-                                     options="-c search_path=elaine,public")
+                                     options="-c search_path=elaine,public",
+                                     connect_timeout=15,
+                                     keepalives=1,        # liga o TCP keepalive
+                                     keepalives_idle=30,  # começa a sondar após 30s parado
+                                     keepalives_interval=10,  # sonda de 10 em 10s
+                                     keepalives_count=3)  # 3 sondas sem resposta = morta
             _conn.commit()
         return _conn
 

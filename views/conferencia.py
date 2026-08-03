@@ -167,7 +167,14 @@ def _rotulo_saida(s: dict) -> str:
 OP_NENHUM = "— (não pago)"
 rotulo_por_id = {s["id"]: _rotulo_saida(s) for s in saidas}
 id_por_rotulo = {v: k for k, v in rotulo_por_id.items()}
-opcoes = [OP_NENHUM] + [rotulo_por_id[s["id"]] for s in saidas]
+
+# TETO DO DROPDOWN (02/08/2026) — por que existe:
+# o SelectboxColumn manda TODAS as opções pro navegador e as materializa ao abrir a
+# célula. Num período de mês inteiro são ~1.900 saídas: MEDIDO — com 1.880 opções a aba
+# CONGELA (>40s sem responder) e, ao voltar, a escolha do Filipe SOME (o front travou
+# antes de mandar a edição pro servidor, então o widget é redesenhado do estado antigo);
+# com ~50 opções o dropdown abre na hora e a escolha persiste. Daí o filtro + o teto.
+MAX_OPCOES = 150
 
 EMOJI = {"casado": "🟢", "categoria": "🟢", "valor": "🟡", "sem_saida": "🔴"}
 ROTULO_STATUS = {"casado": "casado (nome+valor)", "categoria": "casado (categoria+valor)",
@@ -310,6 +317,51 @@ with st.expander("🔎 Conferir título por título / conciliar (ligar pagamento
     if df_view.empty:
         st.info("Nenhum título nesse filtro.")
         st.stop()
+
+    # ─── Opções do dropdown "Pagamento" (busca + teto — ver MAX_OPCOES) ───────
+    busca_pg = st.text_input(
+        "🔎 Procurar o pagamento (nome do favorecido ou valor)",
+        key="conf_busca_pg", placeholder="ex.:  macdiesel   ·   74.500   ·   #5934",
+        help="Digite parte do nome ou do valor da saída que quitou o título. "
+             "Isso enxuga a lista do dropdown da coluna Pagamento — sem isso, um mês "
+             "inteiro traz quase 2.000 opções e o navegador trava.")
+
+    def _casa_busca(rot: str) -> bool:
+        alvo = busca_pg.strip()
+        if not alvo:
+            return True
+        if _norm(alvo) in _norm(rot):
+            return True
+        # valor digitado solto ("74500", "74.500,00") casa com o valor do rótulo
+        dig = "".join(c for c in alvo if c.isdigit())
+        return bool(dig) and dig in "".join(c for c in rot if c.isdigit())
+
+    # os rótulos JÁ mostrados nas células precisam estar nas opções, senão o Streamlit
+    # descarta o valor da célula e um título conferido volta a aparecer como "não pago"
+    em_uso = {r for r in df_view["Pagamento"] if r != OP_NENHUM}
+    # ...e o mesmo vale pras escolhas AINDA NÃO SALVAS: se ele atrelar um pagamento e
+    # só depois digitar na busca, o rótulo escolhido pode cair fora do filtro — sem
+    # isso ele sumiria da célula justamente antes de salvar.
+    _est = st.session_state.get(f"conf_editor_{rot_sel}") or {}
+    for _ed in (_est.get("edited_rows") or {}).values():
+        _r = _ed.get("Pagamento")
+        if _r and _r != OP_NENHUM:
+            em_uso.add(_r)
+    livres_ids = {s["id"] for s in saidas_livres}
+    cands = [s for s in saidas if _casa_busca(rotulo_por_id[s["id"]])]
+    # ainda não conciliadas primeiro (são as que faltam ligar), maiores no topo
+    cands.sort(key=lambda s: (s["id"] not in livres_ids, -abs(s["valor"])))
+    achados = len(cands)
+    opcoes = [OP_NENHUM] + [rotulo_por_id[s["id"]] for s in cands[:MAX_OPCOES]]
+    opcoes += [r for r in em_uso if r not in set(opcoes)]
+
+    if achados > MAX_OPCOES:
+        st.warning(f"O período tem **{achados}** pagamentos e o dropdown mostra os "
+                   f"**{MAX_OPCOES}** primeiros (os que ainda não foram conciliados, "
+                   "do maior valor pro menor). **Use a busca acima** pra achar o "
+                   "pagamento certo — é o que evita a tela travar.")
+    elif busca_pg.strip():
+        st.caption(f"🔎 **{achados}** pagamento(s) na busca «{busca_pg.strip()}».")
 
     editado = st.data_editor(
         df_view, hide_index=True, use_container_width=True,

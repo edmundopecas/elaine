@@ -22,7 +22,8 @@ import io
 import pandas as pd
 import streamlit as st
 
-from conferencia import _norm, bucket_categoria, casar, parse_a_pagar, similaridade
+from conferencia import (_norm, bucket_categoria, casar, parse_a_pagar, similaridade,
+                         sugerir)
 from db import execute, executemany, query, query_one
 
 
@@ -158,6 +159,19 @@ usadas_baixa = {t["lancamento_id"] for t in ja_baixados}
 saidas_livres = [s for s in saidas if s["id"] not in usadas_baixa]
 res = casar(abertos, saidas_livres)
 
+# ─── PALPITE pros 🔴 (02/08/2026) ────────────────────────────────────────────
+# Filipe: "isso aqui tá uma bagunça, não to conseguindo nem achar nada". O dropdown
+# de Pagamento é UM só pra coluna inteira (limitação do SelectboxColumn), ordenado por
+# valor — pra um título de R$1.495 ele oferecia R$249 mil primeiro. Em julho são 231
+# títulos 🔴 contra 973 saídas livres: achar na mão é agulha no palheiro.
+# Agora o sistema procura por linha: `sugerir` acha o melhor pagamento DAQUELE título
+# (valor ±5% + nome), o texto explica o porquê e um checkbox liga em lote.
+usadas_casar = {t["_saida"]["id"] for t in res["titulos"] if t["_saida"]}
+disponiveis = [s for s in saidas_livres if s["id"] not in usadas_casar]
+sem_pgto = [t for t in res["titulos"] if t["_status"] == "sem_saida"]
+sug_por_tid = {sem_pgto[i]["_tid"]: inf
+               for i, inf in sugerir(sem_pgto, disponiveis).items()}
+
 # ─── Monta as opções do seletor de pagamento ─────────────────────────────────
 def _rotulo_saida(s: dict) -> str:
     d = pd.to_datetime(s["data"]).strftime("%d/%m")
@@ -177,29 +191,57 @@ id_por_rotulo = {v: k for k, v in rotulo_por_id.items()}
 MAX_OPCOES = 150
 
 EMOJI = {"casado": "🟢", "categoria": "🟢", "valor": "🟡", "sem_saida": "🔴"}
-ROTULO_STATUS = {"casado": "casado (nome+valor)", "categoria": "casado (categoria+valor)",
-                 "valor": "valor", "sem_saida": "sem pagamento"}
+# rótulos CURTOS: os antigos ("casado (categoria+valor)") não cabiam na coluna e
+# apareciam cortados na tela do Filipe ("sem pagamen").
+ROTULO_STATUS = {"casado": "casado", "categoria": "casado (cat.)",
+                 "valor": "só valor", "sem_saida": "sem pgto"}
+SEM_SUG = "—"
+
+
+def _venc_curto(v) -> str:
+    """Vencimento como 31/07 — o "2026-07-31" comia a largura da coluna de sugestão."""
+    return pd.to_datetime(v).strftime("%d/%m") if v else "—"
+
+
+def _texto_sug(inf: dict) -> str:
+    """O palpite escrito por extenso, COM O MOTIVO — ele confere sem abrir nada."""
+    s = inf["saida"]
+    d = pd.to_datetime(s["data"]).strftime("%d/%m")
+    nome = (s["contraparte"] or s["descricao"] or "—")[:30]
+    # quando o valor é igual não repete o valor (já está na coluna Previsto) — é o que
+    # cabe na largura da coluna sem cortar o "nome X%", que é metade da explicação.
+    motivo = ("mesmo valor" if abs(inf["dif"]) <= 0.01
+              else f"{brl(s['valor'])} (dif. {brl(inf['dif'])})")
+    return f"{d} · {nome} · {motivo} · nome {inf['sim']:.0%}"
+
 
 linhas = []
 # títulos já baixados (conferidos) aparecem no topo, travados como 🟢
 for t in ja_baixados:
     s = sd_por_id.get(t["lancamento_id"])
     dif = round((s["valor"] - t["valor"]), 2) if s else None
-    linhas.append({"_tid": t["id"], "Status": "🟢 conferido",
-                   "Fornecedor": t["contraparte"], "Vencimento": t["vencimento"],
+    linhas.append({"_tid": t["id"], "_score": -1.0, "Status": "🟢 conferido",
+                   "Fornecedor": t["contraparte"], "Vencimento": _venc_curto(t["vencimento"]),
                    "Tipo": t["tipo_docto"], "Previsto": t["valor"],
+                   "💡 Sugestão do sistema": SEM_SUG, "Ligar": False,
                    "Pagamento": rotulo_por_id.get(t["lancamento_id"], OP_NENHUM),
                    "Δ (pago-prev)": dif})
 for t in res["titulos"]:
     s = t["_saida"]
-    linhas.append({"_tid": t["_tid"],
+    inf = sug_por_tid.get(t["_tid"])
+    linhas.append({"_tid": t["_tid"], "_score": inf["score"] if inf else -1.0,
                    "Status": f"{EMOJI[t['_status']]} {ROTULO_STATUS[t['_status']]}",
-                   "Fornecedor": t["fornecedor"], "Vencimento": t["vencimento"],
+                   "Fornecedor": t["fornecedor"], "Vencimento": _venc_curto(t["vencimento"]),
                    "Tipo": t["tipo_docto"], "Previsto": t["valor"],
+                   "💡 Sugestão do sistema": _texto_sug(inf) if inf else SEM_SUG,
+                   "Ligar": False,
                    "Pagamento": rotulo_por_id.get(s["id"], OP_NENHUM) if s else OP_NENHUM,
                    "Δ (pago-prev)": t["_diferenca"]})
 
 df = pd.DataFrame(linhas)
+# Δ vem só de None quando nada casou → vira coluna de texto e o editor escreve
+# "None" em cada linha (o que o Filipe viu). Como número, célula vazia é vazia.
+df["Δ (pago-prev)"] = pd.to_numeric(df["Δ (pago-prev)"], errors="coerce")
 
 # ─── OS 3 NÚMEROS ────────────────────────────────────────────────────────────
 # Total pago FORA aplicação/resgate E transferência entre empresas (dinheiro andando
@@ -365,39 +407,48 @@ st.download_button(
 
 st.divider()
 # ─── Detalhe título-a-título — ligar o pagamento a cada título (conciliar) ────
-with st.expander("🔎 Conferir título por título / conciliar (ligar pagamento)"):
-    st.caption("🟢 casou (nome+valor, ou categoria+valor — ex.: folha) · 🟡 só valor · "
-               "🔴 sem pagamento. Nos 🔴, abra a coluna **Pagamento**, escolha a saída que "
-               "quitou o título e salve — a baixa fica gravada. Os 🔴 ficam no topo.")
+with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagamento) · "
+                 f"{len(sug_por_tid)} com sugestão"):
+    st.caption("**Como usar:** olhe a coluna **💡 Sugestão do sistema** — é o pagamento "
+               "mais parecido com aquele título (o motivo vem escrito: valor igual ou a "
+               "diferença, e o quanto o nome bate). Se estiver certo, marque **Ligar** e "
+               "clique em salvar. Só quando não houver sugestão é que você precisa "
+               "procurar na mão pela coluna **Pagamento**. Ordem: 🔴 com sugestão no "
+               "topo, depois 🔴 sem sugestão, 🟡 só valor, 🟢 casados e conferidos.")
 
-    def _ordem(status: str) -> int:
-        if status.startswith("🔴"):
-            return 0
-        if status.startswith("🟡"):
-            return 1
-        if "conferido" in status:
-            return 3
-        return 2                          # 🟢 sugerido (casado) — confirmar
+    def _ordem(r) -> int:
+        s = r["Status"]
+        if s.startswith("🔴"):
+            return 0 if r["_score"] >= 0 else 1   # com sugestão primeiro
+        if s.startswith("🟡"):
+            return 2
+        if "conferido" in s:
+            return 4
+        return 3                          # 🟢 sugerido (casado) — confirmar
 
-    df_ord = (df.assign(_o=df["Status"].map(_ordem))
-                .sort_values(["_o", "Previsto"], ascending=[True, False])
+    df_ord = (df.assign(_o=df.apply(_ordem, axis=1))
+                .sort_values(["_o", "_score", "Previsto"], ascending=[True, False, False])
                 .drop(columns=["_o"]))
 
-    # Filtro por status: ver um grupo de cada vez (só 🔴, só 🟢 casados, etc.).
+    # Filtro: ver um grupo de cada vez. "💡 Com sugestão" é o atalho que resolve a
+    # queixa — abre só os 🔴 que o sistema já achou um palpite, que é onde dá pra
+    # trabalhar em lote (os demais 🔴 dependem de procurar na mão).
     _preds = {
-        "🔴 Sem pagamento": lambda s: s.startswith("🔴"),
-        "🟡 Só valor (rever)": lambda s: s.startswith("🟡"),
-        "🟢 Casados (sugeridos)": lambda s: s.startswith("🟢") and "casado" in s,
-        "🟢 Já conferidos": lambda s: "conferido" in s,
+        "💡 Com sugestão": lambda r: r["Status"].startswith("🔴") and r["_score"] >= 0,
+        "🔴 Sem pagamento": lambda r: r["Status"].startswith("🔴"),
+        "🟡 Só valor (rever)": lambda r: r["Status"].startswith("🟡"),
+        "🟢 Casados (sugeridos)": lambda r: r["Status"].startswith("🟢") and "casado" in r["Status"],
+        "🟢 Já conferidos": lambda r: "conferido" in r["Status"],
     }
-    _cont = {rot: int(df_ord["Status"].map(pred).sum()) for rot, pred in _preds.items()}
+    _mask = {rot: df_ord.apply(pred, axis=1) for rot, pred in _preds.items()}
+    _cont = {rot: int(m.sum()) for rot, m in _mask.items()}
     # Rótulos do filtro SEM a contagem — se o número entrasse no texto, a opção mudaria
     # a cada salvamento e o st.radio perderia a seleção (voltava pra "Todos"). A contagem
     # fica numa legenda embaixo; assim o filtro continua no 🔴 depois de salvar.
     rot_sel = st.radio("Ver", ["Todos", *_preds.keys()], horizontal=True, key="conf_filtro")
     st.caption("  ·  ".join([f"Todos: **{len(df_ord)}**"]
                             + [f"{rot}: **{_cont[rot]}**" for rot in _preds]))
-    df_view = df_ord if rot_sel == "Todos" else df_ord[df_ord["Status"].map(_preds[rot_sel])]
+    df_view = df_ord if rot_sel == "Todos" else df_ord[_mask[rot_sel]]
 
     if df_view.empty:
         st.info("Nenhum título nesse filtro.")
@@ -452,24 +503,46 @@ with st.expander("🔎 Conferir título por título / conciliar (ligar pagamento
         df_view, hide_index=True, use_container_width=True,
         key=f"conf_editor_{rot_sel}",
         column_config={
-            "_tid": None,
+            "_tid": None, "_score": None,
             "Status": st.column_config.TextColumn(disabled=True, width="small"),
-            "Fornecedor": st.column_config.TextColumn(disabled=True),
+            "Fornecedor": st.column_config.TextColumn(disabled=True, width="medium"),
             "Vencimento": st.column_config.TextColumn(disabled=True, width="small"),
             "Tipo": st.column_config.TextColumn(disabled=True, width="small"),
             "Previsto": st.column_config.NumberColumn(format="R$ %.2f", disabled=True),
+            "💡 Sugestão do sistema": st.column_config.TextColumn(
+                disabled=True, width="large",
+                help="O pagamento mais parecido com ESTE título: mesma faixa de valor "
+                     "(±5%) e o nome mais próximo. Vem o motivo: 'valor igual' ou a "
+                     "diferença em reais, e o quanto o nome bate. Nada é ligado sozinho "
+                     "— você marca Ligar e salva."),
+            "Ligar": st.column_config.CheckboxColumn(
+                width="small", help="Marque pra gravar a baixa com o pagamento sugerido. "
+                                    "Se você escolher algo na coluna Pagamento, aquela "
+                                    "escolha manda e o Ligar é ignorado."),
             "Pagamento": st.column_config.SelectboxColumn(
-                options=opcoes, width="large",
-                help="Escolha o pagamento do extrato que quitou este título."),
+                options=opcoes, width="medium",
+                help="Só pra quando não houver sugestão (ou a sugestão estiver errada). "
+                     "Use a busca acima pra enxugar a lista."),
             "Δ (pago-prev)": st.column_config.NumberColumn(format="R$ %.2f", disabled=True),
         },
     )
+
+    def _escolhido(r) -> int | None:
+        """Pagamento que vai ser gravado nessa linha: o do dropdown vence; senão, o
+        sugerido quando o Ligar está marcado."""
+        sid = id_por_rotulo.get(r["Pagamento"])
+        if sid:
+            return sid
+        if r.get("Ligar"):
+            inf = sug_por_tid.get(r["_tid"])
+            return inf["saida"]["id"] if inf else None
+        return None
 
     # Feedback ao vivo: a coluna Status é calculada no load e SÓ muda depois de salvar.
     # Aqui conta quantos títulos já têm um pagamento escolhido mas ainda não gravado,
     # pra não parecer que "atrelar o pagamento não fez nada".
     prontos = sum(1 for _, r in editado.iterrows()
-                  if id_por_rotulo.get(r["Pagamento"]) and "conferido" not in r["Status"])
+                  if _escolhido(r) and "conferido" not in r["Status"])
     if prontos:
         st.info(f"🔗 **{prontos}** título(s) com pagamento escolhido, aguardando salvar. "
                 "A bolinha só vira 🟢 (e o título sai da lista dos 🔴) **depois** que você "
@@ -478,7 +551,7 @@ with st.expander("🔎 Conferir título por título / conciliar (ligar pagamento
     if st.button("💾 Salvar conciliação", type="primary"):
         novos_vinc = {}   # tid -> saida_id (ou None)
         for _, r in editado.iterrows():
-            novos_vinc[r["_tid"]] = id_por_rotulo.get(r["Pagamento"])
+            novos_vinc[r["_tid"]] = _escolhido(r)
         usados = [sid for sid in novos_vinc.values() if sid]
         dups = {x for x in usados if usados.count(x) > 1}
         if dups:

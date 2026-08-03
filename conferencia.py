@@ -15,6 +15,7 @@ faz a persistência. Assim dá pra testar por linha de comando.
 """
 from __future__ import annotations
 
+import bisect
 import hashlib
 import re
 import unicodedata
@@ -238,3 +239,72 @@ def casar(titulos: list[dict], saidas: list[dict], *,
     # Toda saída casada (por nome OU categoria) sai do "sem título".
     sem_titulo = [s for s in saidas if s["id"] not in usadas]
     return {"titulos": anotados, "saidas_sem_titulo": sem_titulo}
+
+
+# ─── Palpite pros que o `casar` NÃO fechou (os 🔴) ───────────────────────────
+def sugerir(titulos: list[dict], saidas: list[dict], *, tol_rel: float = 0.05,
+            tol_min: float = 5.0, nome_minimo: float = 0.60,
+            nome_confirma: float = 0.55) -> dict[int, dict]:
+    """
+    Melhor palpite de pagamento pra cada título que sobrou 🔴, um-para-um.
+
+    Por que existe (02/08/2026): o `casar` só fecha com valor IGUAL a reais; o que
+    sobra o Filipe tinha que caçar no dropdown de ~970 saídas ordenado por valor —
+    "não to conseguindo nem achar nada". Aqui o sistema procura por ele.
+
+    Diferente do `casar`, aceita valor PRÓXIMO (juros, multa, desconto, arredondamento
+    do ERP): a faixa é ±5% do título (mínimo ±R$5). Fora da faixa não palpita.
+
+    REGRA DE ACEITE (apertada de propósito — palpite ruim vira baixa errada, e uma
+    baixa errada custa a confiança na tela inteira, ver [feedback] de 07/07):
+      • valor IGUAL (≤1 centavo)  → palpita, qualquer nome (é o caso ENERGEX × o Pix
+        pra PARANA-OIL: nomes diferentes, mesmo dinheiro — só o valor denuncia);
+      • valor DIFERENTE           → só palpita se o nome for de verdade (≥0.60).
+        Sem isso a cauda virava lixo: "MG VIDROS R$3.460,55 → CARLOS EDA R$3.381,78"
+        e "MUNICIPIO DE MACEIO → BB Rende Fácil" apareciam como palpite.
+
+    Marca `forte=True` SÓ quando valor igual E nome ≥0.55 (aí é praticamente certeza).
+    Todo o resto vem como palpite a conferir — inclusive nome 97% com valor diferente
+    (ex.: MUNICIPIO DE MACEIO × MUNICIPIO DE MARECHAL DEODORO, que são prefeituras
+    diferentes com nome parecido). A tela mostra o motivo (dif de valor + % do nome)
+    pro Filipe decidir — nada é ligado sozinho.
+
+    Guloso do melhor par pro pior e 1-p/-1: a mesma saída nunca é sugerida pra dois
+    títulos (senão o salvar barra tudo com "mesmo pagamento em mais de um título").
+
+    Devolve {índice do título: {"saida", "score", "dif", "sim", "forte"}}.
+    """
+    if not titulos or not saidas:
+        return {}
+    ordenadas = sorted(saidas, key=lambda s: s["valor"])
+    valores = [s["valor"] for s in ordenadas]
+
+    pares = []
+    for i, t in enumerate(titulos):
+        v = float(t["valor"])
+        tol = max(v * tol_rel, tol_min)
+        # janela por valor primeiro (bisect): sem isso seriam 231×970 comparações de
+        # nome a cada rerun da tela — o SequenceMatcher é caro e a tela travaria.
+        lo = bisect.bisect_left(valores, v - tol)
+        hi = bisect.bisect_right(valores, v + tol)
+        for s in ordenadas[lo:hi]:
+            dif = s["valor"] - v
+            exato = abs(dif) <= 0.01
+            sim = similaridade(t["fornecedor"], _nome_saida(s))
+            if not (exato or sim >= nome_minimo):
+                continue
+            p_valor = 1.0 if exato else max(0.0, 1.0 - abs(dif) / tol)
+            score = 0.6 * p_valor + 0.4 * sim
+            pares.append((score, i, s, round(dif, 2), round(sim, 3),
+                          exato and sim >= nome_confirma))
+    pares.sort(key=lambda p: -p[0])
+
+    escolha: dict[int, dict] = {}
+    usadas: set = set()
+    for score, i, s, dif, sim, forte in pares:
+        if i in escolha or s["id"] in usadas:
+            continue
+        escolha[i] = {"saida": s, "score": round(score, 3), "dif": dif,
+                      "sim": sim, "forte": forte}
+        usadas.add(s["id"])
+    return escolha

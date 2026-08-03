@@ -22,6 +22,21 @@ import io
 import pandas as pd
 import streamlit as st
 
+import importlib
+
+import conferencia as _motor
+
+# AUTO-CURA DE DEPLOY (02/08/2026) — por que este reload existe:
+# no Streamlit Cloud o processo é REAPROVEITADO depois do deploy. A PÁGINA
+# (views/conferencia.py) é re-executada a cada rerun, mas `conferencia.py` é um MÓDULO:
+# fica em sys.modules com a versão ANTIGA. Quando o deploy traz função nova no motor
+# (foi o caso do `sugerir`), o import de baixo estoura `ImportError: cannot import name
+# 'sugerir'` e a tela fica VERMELHA até alguém clicar em Reboot no painel do Streamlit.
+# Recarregando o módulo quando falta o símbolo novo, a tela se conserta sozinha no
+# primeiro F5. Ao acrescentar função nova ao motor, troque o nome na checagem abaixo.
+if not hasattr(_motor, "sugerir"):
+    importlib.reload(_motor)          # atualiza sys.modules['conferencia'] no lugar
+
 from conferencia import (_norm, bucket_categoria, casar, parse_a_pagar, similaridade,
                          sugerir)
 from db import execute, executemany, query, query_one

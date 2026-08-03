@@ -463,11 +463,35 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
     rot_sel = st.radio("Ver", ["Todos", *_preds.keys()], horizontal=True, key="conf_filtro")
     st.caption("  ·  ".join([f"Todos: **{len(df_ord)}**"]
                             + [f"{rot}: **{_cont[rot]}**" for rot in _preds]))
-    df_view = df_ord if rot_sel == "Todos" else df_ord[_mask[rot_sel]]
+    df_grupo = df_ord if rot_sel == "Todos" else df_ord[_mask[rot_sel]]
 
-    if df_view.empty:
+    if df_grupo.empty:
         st.info("Nenhum título nesse filtro.")
         st.stop()
+
+    # ─── PÁGINAS de 50 (03/08/2026) — por que existe ─────────────────────────
+    # Filipe: "antes era tudo organizado e agora tá bagunçado" (print do dropdown com as
+    # opções fora de qualquer ordem). MEDIDO: com o mês inteiro em "Todos" a coluna
+    # Pagamento tinha **1.079 opções, 928 delas vindas de um `set`** (o `em_uso`, que
+    # garante que o rótulo já escolhido continue na lista) — e set em Python NÃO tem
+    # ordem, então aquela cauda saía embaralhada. Além de bagunçar, furava o teto de
+    # 150 que existe justamente pra tela não congelar.
+    # Com 50 títulos por página, o `em_uso` cai pra no máximo 50 e a lista fica curta e
+    # ORDENADA (ver a ordenação do `opcoes` mais abaixo).
+    PAG_TAM = 50
+    n_pag = (len(df_grupo) + PAG_TAM - 1) // PAG_TAM
+    if n_pag > 1:
+        cpg = st.columns([1, 3])
+        pag = cpg[0].number_input(f"Página (de {n_pag})", min_value=1, max_value=n_pag,
+                                  value=1, step=1, key=f"conf_pag_{rot_sel}")
+        ini = (int(pag) - 1) * PAG_TAM
+        df_view = df_grupo.iloc[ini:ini + PAG_TAM]
+        cpg[1].caption(f"Mostrando **{ini + 1}–{min(ini + PAG_TAM, len(df_grupo))}** "
+                       f"de **{len(df_grupo)}** títulos. ⚠️ **Salve antes de trocar de "
+                       "página** — o botão grava só o que está na página aberta.")
+    else:
+        pag = 1
+        df_view = df_grupo
 
     # ─── Opções do dropdown "Pagamento" (busca + teto — ver MAX_OPCOES) ───────
     busca_pg = st.text_input(
@@ -493,7 +517,7 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
     # ...e o mesmo vale pras escolhas AINDA NÃO SALVAS: se ele atrelar um pagamento e
     # só depois digitar na busca, o rótulo escolhido pode cair fora do filtro — sem
     # isso ele sumiria da célula justamente antes de salvar.
-    _est = st.session_state.get(f"conf_editor_{rot_sel}") or {}
+    _est = st.session_state.get(f"conf_editor_{rot_sel}_{pag}") or {}
     for _ed in (_est.get("edited_rows") or {}).values():
         _r = _ed.get("Pagamento")
         if _r and _r != OP_NENHUM:
@@ -503,20 +527,31 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
     # ainda não conciliadas primeiro (são as que faltam ligar), maiores no topo
     cands.sort(key=lambda s: (s["id"] not in livres_ids, -abs(s["valor"])))
     achados = len(cands)
-    opcoes = [OP_NENHUM] + [rotulo_por_id[s["id"]] for s in cands[:MAX_OPCOES]]
-    opcoes += [r for r in em_uso if r not in set(opcoes)]
+
+    # ORDEM DA LISTA (03/08/2026): as opções saem sempre na MESMA ordem — data mais
+    # recente primeiro e, no mesmo dia, do maior valor pro menor. Antes o `em_uso`
+    # entrava no fim direto de um `set` (sem ordem nenhuma) e a lista virava aquela
+    # bagunça do print. Aqui os dois grupos (candidatos do teto + rótulos em uso)
+    # viram um conjunto de IDs e são ordenados JUNTOS.
+    ids_opcao = {s["id"] for s in cands[:MAX_OPCOES]} | {id_por_rotulo[r] for r in em_uso
+                                                        if r in id_por_rotulo}
+    opcoes = [OP_NENHUM] + [rotulo_por_id[s["id"]] for s in
+                            sorted((s for s in saidas if s["id"] in ids_opcao),
+                                   key=lambda s: (s["data"], abs(s["valor"])), reverse=True)]
 
     if achados > MAX_OPCOES:
-        st.warning(f"O período tem **{achados}** pagamentos e o dropdown mostra os "
-                   f"**{MAX_OPCOES}** primeiros (os que ainda não foram conciliados, "
-                   "do maior valor pro menor). **Use a busca acima** pra achar o "
-                   "pagamento certo — é o que evita a tela travar.")
+        st.caption(f"A coluna **Pagamento** está com **{len(opcoes) - 1}** opções "
+                   f"(das {achados} saídas do período), **da mais recente pra mais "
+                   "antiga**. Entram as que ainda não foram conciliadas, das maiores "
+                   "pras menores, mais as que já estão escolhidas nesta página. "
+                   "**Para achar uma específica, use a busca acima** — a lista inteira "
+                   "no navegador é o que trava a tela.")
     elif busca_pg.strip():
         st.caption(f"🔎 **{achados}** pagamento(s) na busca «{busca_pg.strip()}».")
 
     editado = st.data_editor(
         df_view, hide_index=True, use_container_width=True,
-        key=f"conf_editor_{rot_sel}",
+        key=f"conf_editor_{rot_sel}_{pag}",   # por filtro E por página: edição não vaza
         column_config={
             "_tid": None, "_score": None,
             "Status": st.column_config.TextColumn(disabled=True, width="small"),

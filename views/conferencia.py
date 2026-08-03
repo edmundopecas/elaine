@@ -48,6 +48,26 @@ def brl(v) -> str:
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+def brl_ord(valores) -> list[str]:
+    """Dinheiro em BR (R$ 1.234,56) **que ordena pelo valor** quando o Filipe clica
+    no cabeçalho da coluna.
+
+    Por que existe (03/08/2026): coluna de NÚMERO ordena certo mas o Streamlit não
+    escreve dinheiro em português — `format="R$ %.2f"` sai "R$ 3930.38" e
+    `format="localized"` come os centavos ("R$ 2.500"); e célula vazia vira a palavra
+    **None** (testado: até nulo de verdade em Float64 escreve "None"). Coluna de TEXTO
+    escreve bonito, mas ordena como PALAVRA — foi o que ele viu: 336 · 300 · 3.930 ·
+    290. A saída é texto **preenchido com espaço à esquerda até todos terem o mesmo
+    tamanho**: aí a ordem alfabética passa a ser a ordem do valor (espaço vem antes de
+    dígito), e como a coluna é alinhada à direita o espaço não aparece.
+    SÓ vale pra coluna de valores POSITIVOS — com negativo o comprimento deixa de
+    acompanhar a grandeza e a ordem sai errada.
+    """
+    txt = ["" if v is None or pd.isna(v) else brl(v) for v in valores]
+    larg = max((len(t) for t in txt), default=0)
+    return [t.rjust(larg) for t in txt]
+
+
 # REGRA (pedido do Filipe, 07/07/2026): "✅ está no CPR" SÓ quando a saída casa de
 # verdade com um título (nome+valor) OU já tem baixa. TUDO que não casou = "❌ não
 # está no CPR" — sem lista de exceção por categoria. A tela é uma conferência crua do
@@ -608,13 +628,14 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
                            "foi pago por uma conta que ainda não foi importada).")
             _cdf = pd.DataFrame([{
                 "Data": pd.to_datetime(s["data"]).strftime("%d/%m"),
-                "Valor pago": brl(s["valor"]),
+                "Valor pago": s["valor"],
                 "Δ p/ o título": brl(dif),
                 "Favorecido no extrato": s["contraparte"] or s["descricao"],
                 "Nome bate": f"{sim:.0%}",
                 "Empresa": s["empresa_apelido"],
                 "Situação": "🔗 já sugerido a outro" if s["id"] in _usado_por else "🆓 livre",
                 "Nº": s["id"]} for dif, sim, s in _cand])
+            _cdf["Valor pago"] = brl_ord(_cdf["Valor pago"])
             _ev = st.dataframe(
                 _cdf, hide_index=True, use_container_width=True,
                 on_select="rerun", selection_mode="single-row",
@@ -725,7 +746,7 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
     df_view = df_view.copy()
     df_view["Δ (pago-prev)"] = ["" if pd.isna(v) else brl(v)
                                 for v in df_view["Δ (pago-prev)"]]
-    df_view["Previsto"] = [brl(v) for v in df_view["Previsto"]]
+    df_view["Previsto"] = brl_ord(df_view["Previsto"])
     if not (df_view["💡 Sugestão do sistema"] != SEM_SUG).any():
         df_view = df_view.drop(columns=["💡 Sugestão do sistema", "Ligar"])
     # Δ só faz sentido quando existe pagamento ligado; vazia em todas as linhas ela só
@@ -738,7 +759,7 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
         "Status": st.column_config.TextColumn(disabled=True, width=85),
         "Fornecedor": st.column_config.TextColumn(disabled=True, width=195),
         "Venc. · Tipo": st.column_config.TextColumn(disabled=True, width=130),
-        "Previsto": st.column_config.TextColumn(disabled=True, width=95,
+        "Previsto": st.column_config.TextColumn(disabled=True, width=115,
                                                 alignment="right"),
         "💡 Sugestão do sistema": st.column_config.TextColumn(
             disabled=True, width=230,

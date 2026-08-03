@@ -169,6 +169,26 @@ abertos = [{"_tid": t["id"], "fornecedor": t["contraparte"] or "", "valor": t["v
            for t in titulos_db if not t["lancamento_id"]]
 ja_baixados = [t for t in titulos_db if t["lancamento_id"]]
 
+# ─── PAGAMENTO FORA DO PERÍODO (03/08/2026) — BUG GRAVE, achado no teste ──────
+# Um título já conciliado com uma saída de FORA do período aberto (baixa feita em
+# 20/07 com a tela em 27–31/07) não encontrava o rótulo: a célula Pagamento mostrava
+# "— (não pago)" mesmo estando 🟢 conferido. E o pior: ao clicar em **Salvar
+# conciliação** o motor lia aquilo como "sem pagamento" e **DESFAZIA a baixa** —
+# 50 títulos por página de uma vez, sem avisar. Buscando esses lançamentos à parte,
+# o rótulo existe, a célula mostra o pagamento certo e o salvar não mexe em nada.
+# (O `if` do salvar também ganhou uma trava, ver lá embaixo.)
+_ids_fora = [t["lancamento_id"] for t in ja_baixados
+             if t["lancamento_id"] and t["lancamento_id"] not in sd_por_id]
+if _ids_fora:
+    _ph = ",".join(["?"] * len(_ids_fora))
+    for _s in query(f"""SELECT l.id, l.data, l.valor, l.contraparte, l.descricao,
+                        e.apelido AS empresa_apelido, COALESCE(p.nome,'—') AS plano
+                        FROM lancamentos l
+                        LEFT JOIN empresas e ON e.id=l.empresa_id
+                        LEFT JOIN plano_contas p ON p.id=l.plano_conta_id
+                        WHERE l.id IN ({_ph})""", tuple(_ids_fora)):
+        sd_por_id[_s["id"]] = _s
+
 # saídas já usadas por baixas existentes não podem ser sugeridas de novo
 usadas_baixa = {t["lancamento_id"] for t in ja_baixados}
 saidas_livres = [s for s in saidas if s["id"] not in usadas_baixa]
@@ -188,13 +208,20 @@ sug_por_tid = {sem_pgto[i]["_tid"]: inf
                for i, inf in sugerir(sem_pgto, disponiveis).items()}
 
 # ─── Monta as opções do seletor de pagamento ─────────────────────────────────
+# ORDEM DO RÓTULO (03/08/2026): o VALOR vem primeiro. Antes era "data · nome · valor"
+# e o Filipe — que procura pelo VALOR do título — tinha que varrer o meio de cada
+# linha pra achar o número. Com o valor na frente e a lista ordenada por valor, achar
+# R$ 2.926,10 é descer a coluna até chegar na faixa.
+# NÃO alinhar o valor com espaço (tentei U+2007): o navegador APARA espaço no começo
+# do texto, aí o valor da célula deixa de bater com a opção da lista e o Streamlit
+# desenha a célula VAZIA — títulos conferidos apareciam sem pagamento nenhum.
 def _rotulo_saida(s: dict) -> str:
     d = pd.to_datetime(s["data"]).strftime("%d/%m")
     nome = (s["contraparte"] or s["descricao"] or "—")[:28]
-    return f"{d} · {nome} · {brl(s['valor'])} · #{s['id']}"
+    return f"{brl(s['valor'])} · {d} · {nome} · #{s['id']}"
 
 OP_NENHUM = "— (não pago)"
-rotulo_por_id = {s["id"]: _rotulo_saida(s) for s in saidas}
+rotulo_por_id = {s["id"]: _rotulo_saida(s) for s in sd_por_id.values()}
 id_por_rotulo = {v: k for k, v in rotulo_por_id.items()}
 
 # TETO DO DROPDOWN (02/08/2026) — por que existe:
@@ -218,6 +245,12 @@ def _venc_curto(v) -> str:
     return pd.to_datetime(v).strftime("%d/%m") if v else "—"
 
 
+def _venc_tipo(v, tipo) -> str:
+    """"31/07 · MERCADORIA" numa coluna só."""
+    t = (tipo or "").strip()
+    return f"{_venc_curto(v)} · {t}" if t else _venc_curto(v)
+
+
 def _texto_sug(inf: dict) -> str:
     """O palpite escrito por extenso, COM O MOTIVO — ele confere sem abrir nada."""
     s = inf["saida"]
@@ -236,8 +269,9 @@ for t in ja_baixados:
     s = sd_por_id.get(t["lancamento_id"])
     dif = round((s["valor"] - t["valor"]), 2) if s else None
     linhas.append({"_tid": t["id"], "_score": -1.0, "Status": "🟢 conferido",
-                   "Fornecedor": t["contraparte"], "Vencimento": _venc_curto(t["vencimento"]),
-                   "Tipo": t["tipo_docto"], "Previsto": t["valor"],
+                   "Fornecedor": t["contraparte"],
+                   "Venc. · Tipo": _venc_tipo(t["vencimento"], t["tipo_docto"]),
+                   "Previsto": t["valor"],
                    "💡 Sugestão do sistema": SEM_SUG, "Ligar": False,
                    "Pagamento": rotulo_por_id.get(t["lancamento_id"], OP_NENHUM),
                    "Δ (pago-prev)": dif})
@@ -246,8 +280,9 @@ for t in res["titulos"]:
     inf = sug_por_tid.get(t["_tid"])
     linhas.append({"_tid": t["_tid"], "_score": inf["score"] if inf else -1.0,
                    "Status": f"{EMOJI[t['_status']]} {ROTULO_STATUS[t['_status']]}",
-                   "Fornecedor": t["fornecedor"], "Vencimento": _venc_curto(t["vencimento"]),
-                   "Tipo": t["tipo_docto"], "Previsto": t["valor"],
+                   "Fornecedor": t["fornecedor"],
+                   "Venc. · Tipo": _venc_tipo(t["vencimento"], t["tipo_docto"]),
+                   "Previsto": t["valor"],
                    "💡 Sugestão do sistema": _texto_sug(inf) if inf else SEM_SUG,
                    "Ligar": False,
                    "Pagamento": rotulo_por_id.get(s["id"], OP_NENHUM) if s else OP_NENHUM,
@@ -359,6 +394,18 @@ def _fatia(mask) -> pd.DataFrame:
             if len(_base_df) else _base_df)
 
 
+def _mostra(dfx) -> None:
+    """Desenha a tabela com o dinheiro no padrão BR (R$ 1.234,56), alinhado à direita.
+    O `format="R$ %.2f"` do Streamlit escrevia "R$ 4754.79" (ponto decimal, sem milhar)
+    e o `format="localized"` come os centavos ("3.947,3") — os dois desalinhavam a
+    coluna. O DataFrame original continua NUMÉRICO: é ele que vai pro Excel."""
+    st.dataframe(dfx.assign(Valor=dfx["Valor"].map(brl)), hide_index=True,
+                 use_container_width=True,
+                 column_config={"Valor": st.column_config.TextColumn(
+                     width="small", alignment="right"),
+                     "Fornecedor/Contraparte": st.column_config.TextColumn(width="large")})
+
+
 conferir_df = _fatia((~_base_df["_ok"]) & (~_base_df["_natureza"])) if len(_base_df) else _base_df
 natureza_df = _fatia(_base_df["_natureza"]) if len(_base_df) else _base_df
 dentro_df = _fatia(_base_df["_ok"]) if len(_base_df) else _base_df
@@ -371,8 +418,7 @@ st.caption("É a fila de trabalho: saída que não casou com título **e** não 
            "categoria que passa por fora do CPR. Se está aqui, ou falta lançar no "
            "Argos, ou o título existe e precisa ser conciliado lá embaixo.")
 if len(conferir_df):
-    st.dataframe(conferir_df, hide_index=True, use_container_width=True,
-                 column_config={"Valor": st.column_config.NumberColumn(format="R$ %.2f")})
+    _mostra(conferir_df)
 else:
     st.success("Nada pendente de explicação neste período. 🎉")
 
@@ -383,12 +429,10 @@ with st.expander(f"🏦 Fora do CPR — **por natureza** (não passa no Argos) �
                "título no Contas a Pagar. Em julho inteiro essas categorias casaram com "
                "título em ~0% das vezes — por isso saem da fila de conferir. Continuam "
                "contadas como ❌ nos números acima: **nada aqui está marcado como ✅**.")
-    st.dataframe(natureza_df, hide_index=True, use_container_width=True,
-                 column_config={"Valor": st.column_config.NumberColumn(format="R$ %.2f")})
+    _mostra(natureza_df)
 
 with st.expander(f"✅ Está no CPR · {len(dentro_df)} saída(s) · {brl(tot_pago - v_fora)}"):
-    st.dataframe(dentro_df, hide_index=True, use_container_width=True,
-                 column_config={"Valor": st.column_config.NumberColumn(format="R$ %.2f")})
+    _mostra(dentro_df)
 
 saidas_df = _base_df.sort_values(["_ok", "_natureza", "Valor"],
                                  ascending=[True, True, False]).copy()
@@ -422,14 +466,20 @@ st.download_button(
 
 st.divider()
 # ─── Detalhe título-a-título — ligar o pagamento a cada título (conciliar) ────
+# ABERTO POR PADRÃO (03/08/2026): expander do Streamlit volta a FECHAR a cada rerun —
+# ou seja, toda vez que ele salvava uma conciliação (ou trocava um filtro) a seção
+# sumia e ele tinha que rolar a página e abrir de novo. É a área de trabalho da tela.
 with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagamento) · "
-                 f"{len(sug_por_tid)} com sugestão"):
-    st.caption("**Como usar:** olhe a coluna **💡 Sugestão do sistema** — é o pagamento "
-               "mais parecido com aquele título (o motivo vem escrito: valor igual ou a "
-               "diferença, e o quanto o nome bate). Se estiver certo, marque **Ligar** e "
-               "clique em salvar. Só quando não houver sugestão é que você precisa "
-               "procurar na mão pela coluna **Pagamento**. Ordem: 🔴 com sugestão no "
-               "topo, depois 🔴 sem sugestão, 🟡 só valor, 🟢 casados e conferidos.")
+                 f"{len(sug_por_tid)} com sugestão", expanded=True):
+    st.caption("**Como usar — dois caminhos:** (1) **em lote**, pela tabela: olhe a "
+               "coluna **💡 Sugestão do sistema** (vem o motivo: valor igual ou a "
+               "diferença, e o quanto o nome bate), marque **Ligar** nas certas e "
+               "clique em salvar; (2) **um a um**, pelo **🎯 Achar o pagamento de um "
+               "título** — escolha o título e o sistema lista os pagamentos mais "
+               "parecidos **com ele**, do valor mais próximo pro mais distante. "
+               "Use o 🎯 quando não houver sugestão: é onde antes você penava no "
+               "dropdown. Ordem da tabela: 🔴 com sugestão no topo, depois 🔴 sem "
+               "sugestão, 🟡 só valor, 🟢 casados e conferidos.")
 
     def _ordem(r) -> int:
         s = r["Status"]
@@ -493,6 +543,109 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
         pag = 1
         df_view = df_grupo
 
+    # ─── 🎯 ACHAR O PAGAMENTO DE UM TÍTULO (03/08/2026) ───────────────────────
+    # Por que existe: o dropdown da coluna Pagamento é UM SÓ pra tabela inteira
+    # (limitação do SelectboxColumn do Streamlit) — ele não sabe de QUAL título é a
+    # linha, então não tem como colocar o pagamento certo em cima. Por isso o Filipe
+    # via, num título de R$ 2.926, uma lista começando em R$ 19.866: "não consigo
+    # encontrar ou demoro muito para encontrar".
+    # Aqui é o caminho inverso e é o jeito rápido: escolhe-se O TÍTULO (o selectbox
+    # aceita digitar pra procurar) e o sistema traz os pagamentos MAIS PARECIDOS COM
+    # ELE — do valor mais próximo pro mais distante, com a diferença e o quanto o nome
+    # bate escritos na linha. Clica na linha certa e liga; grava na hora, sem depender
+    # do "Salvar conciliação" da tabela de baixo.
+    _pend = df_grupo[~df_grupo["Status"].str.contains("conferido")]
+    with st.container(border=True):
+        st.markdown("#### 🎯 Achar o pagamento de um título")
+        if _pend.empty:
+            st.success("Nenhum título pendente neste filtro. 🎉")
+        else:
+            _op_tit = {}
+            for _, _r in _pend.iterrows():
+                _rot = (f"{brl(_r['Previsto'])} · venc {_r['Venc. · Tipo']} · "
+                        f"{_r['Fornecedor']} · nº {int(_r['_tid'])}")
+                _op_tit[_rot] = int(_r["_tid"])
+            _rot_tit = st.selectbox(
+                f"Título a conciliar — **{len(_op_tit)}** pendente(s) neste filtro "
+                "(pode digitar parte do nome ou do valor pra procurar)",
+                list(_op_tit), key=f"conf_tit_{rot_sel}")
+            tid_sel = _op_tit[_rot_tit]
+            t_sel = next(t for t in titulos_db if t["id"] == tid_sel)
+
+            # saída que o `casar` já apontou pra OUTRO título: não some da lista (pode
+            # ser justamente a certa aqui), mas vem marcada pra ele saber.
+            _usado_por = {t["_saida"]["id"] for t in res["titulos"] if t["_saida"]}
+            _co = st.columns([2, 1])
+            _ordem = _co[0].radio("Ordenar os pagamentos por",
+                                  ["💰 valor mais próximo", "🔤 nome mais parecido"],
+                                  horizontal=True, key="conf_cand_ordem")
+            # MEDIDO nos dados de julho: sem esse filtro, os 4 primeiros candidatos de
+            # um título de R$ 2.926 eram "RESGATE CONTA REMUNERADA", "DÉBITO NA CONTA
+            # CORRENTE" e transferência interna — dinheiro andando entre as contas do
+            # grupo, que nunca quita título do Argos. Fora por padrão; se ele
+            # desconfiar que a saída foi classificada errado, marca a caixinha.
+            _tudo = _co[1].checkbox("Incluir aplicações e transferências internas",
+                                    key="conf_cand_tudo")
+            _pool = [s for s in saidas_livres
+                     if _tudo or not any(k in _norm(s["plano"] or "")
+                                         for k in _EXCLUIR_PAGO)]
+            _alvo_v = float(t_sel["valor"])
+            _cand = [(round(s["valor"] - _alvo_v, 2),
+                      similaridade(t_sel["contraparte"] or "",
+                                   s["contraparte"] or s["descricao"] or ""), s)
+                     for s in _pool]
+            _cand.sort(key=(lambda c: (abs(c[0]), -c[1])) if _ordem.startswith("💰")
+                       else (lambda c: (-c[1], abs(c[0]))))
+            _cand = _cand[:25]
+            # AVISO DE BUSCA VAZIA: às vezes não existe pagamento nenhum parecido — o
+            # título simplesmente não foi pago no período. Dizer isso na cara poupa o
+            # tempo que ele gastava rolando o dropdown atrás de algo que não existe.
+            if _cand and not any(abs(d) <= 0.01 or sm >= 0.60 for d, sm, _ in _cand):
+                st.warning(f"⚠️ **Nenhum pagamento bate com este título** no período: o "
+                           f"valor mais próximo está a {brl(abs(_cand[0][0]))} de distância e o nome "
+                           f"mais parecido dá {max(sm for _, sm, _ in _cand):.0%}. "
+                           "Provavelmente este título **não foi pago** nestas datas (ou "
+                           "foi pago por uma conta que ainda não foi importada).")
+            _cdf = pd.DataFrame([{
+                "Data": pd.to_datetime(s["data"]).strftime("%d/%m"),
+                "Valor pago": brl(s["valor"]),
+                "Δ p/ o título": brl(dif),
+                "Favorecido no extrato": s["contraparte"] or s["descricao"],
+                "Nome bate": f"{sim:.0%}",
+                "Empresa": s["empresa_apelido"],
+                "Situação": "🔗 já sugerido a outro" if s["id"] in _usado_por else "🆓 livre",
+                "Nº": s["id"]} for dif, sim, s in _cand])
+            _ev = st.dataframe(
+                _cdf, hide_index=True, use_container_width=True,
+                on_select="rerun", selection_mode="single-row",
+                key=f"conf_cand_{tid_sel}",
+                column_config={
+                    "Valor pago": st.column_config.TextColumn(width="small",
+                                                              alignment="right"),
+                    "Δ p/ o título": st.column_config.TextColumn(
+                        width="small", alignment="right",
+                        help="Pago − previsto. Zero = valor igualzinho ao do título."),
+                    "Favorecido no extrato": st.column_config.TextColumn(width="large"),
+                    "Nome bate": st.column_config.TextColumn(width="small"),
+                    "Situação": st.column_config.TextColumn(width="medium")})
+            _sel = list(_ev.selection.rows) if _ev and _ev.selection else []
+            if _sel:
+                _esc = _cand[_sel[0]][2]
+                _d = pd.to_datetime(_esc["data"]).strftime("%d/%m")
+                st.warning(f"**{t_sel['contraparte']}** · previsto {brl(t_sel['valor'])} "
+                           f"→ pagamento de **{_d}** · "
+                           f"{_esc['contraparte'] or _esc['descricao']} · "
+                           f"**{brl(_esc['valor'])}** (Δ {brl(_esc['valor'] - t_sel['valor'])}).")
+                if st.button("🔗 Ligar este pagamento ao título", type="primary",
+                             key="conf_ligar_um"):
+                    execute("UPDATE titulos SET lancamento_id=?, status='pago', "
+                            "data_baixa=? WHERE id=?", (_esc["id"], _esc["data"], tid_sel))
+                    st.success("Conciliado! O título já saiu da fila.")
+                    st.rerun()
+            else:
+                st.caption("👆 Clique na **caixinha à esquerda** da linha do pagamento "
+                           "certo — aí aparece o botão pra ligar. Nada é ligado sozinho.")
+
     # ─── Opções do dropdown "Pagamento" (busca + teto — ver MAX_OPCOES) ───────
     busca_pg = st.text_input(
         "🔎 Procurar o pagamento (nome do favorecido ou valor)",
@@ -501,15 +654,26 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
              "Isso enxuga a lista do dropdown da coluna Pagamento — sem isso, um mês "
              "inteiro traz quase 2.000 opções e o navegador trava.")
 
-    def _casa_busca(rot: str) -> bool:
-        alvo = busca_pg.strip()
-        if not alvo:
+    # BUSCA POR CAMPO (03/08/2026) — por que mudou:
+    # a versão antiga comparava os dígitos do TEXTO INTEIRO do rótulo. Resultado
+    # medido no print do Filipe: procurando «290» ela devolvia 60 "achados" que eram
+    # a DATA ("29/07"), o Nº DO LANÇAMENTO ("#10290") e pedaços do histórico — o
+    # pagamento de R$ 2.900 que ele queria ficava enterrado no meio do lixo.
+    # Agora cada coisa procura no seu campo: número → só o VALOR; "#123" → só o id;
+    # texto → só o nome do favorecido.
+    _alvo = busca_pg.strip()
+    _alvo_dig = "".join(c for c in _alvo if c.isdigit())
+    _so_numero = bool(_alvo_dig) and not any(c.isalpha() for c in _alvo)
+
+    def _casa_busca(s: dict) -> bool:
+        if not _alvo:
             return True
-        if _norm(alvo) in _norm(rot):
-            return True
-        # valor digitado solto ("74500", "74.500,00") casa com o valor do rótulo
-        dig = "".join(c for c in alvo if c.isdigit())
-        return bool(dig) and dig in "".join(c for c in rot if c.isdigit())
+        if _alvo.startswith("#"):
+            return bool(_alvo_dig) and _alvo_dig in str(s["id"])
+        if _so_numero:
+            # "2926" acha R$ 2.926,10 · "290" acha R$ 2.900,00 e R$ 290,00
+            return _alvo_dig in "".join(c for c in brl(s["valor"]) if c.isdigit())
+        return _norm(_alvo) in _norm(s["contraparte"] or s["descricao"] or "")
 
     # os rótulos JÁ mostrados nas células precisam estar nas opções, senão o Streamlit
     # descarta o valor da célula e um título conferido volta a aparecer como "não pago"
@@ -523,58 +687,81 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
         if _r and _r != OP_NENHUM:
             em_uso.add(_r)
     livres_ids = {s["id"] for s in saidas_livres}
-    cands = [s for s in saidas if _casa_busca(rotulo_por_id[s["id"]])]
+    cands = [s for s in saidas if _casa_busca(s)]
     # ainda não conciliadas primeiro (são as que faltam ligar), maiores no topo
     cands.sort(key=lambda s: (s["id"] not in livres_ids, -abs(s["valor"])))
     achados = len(cands)
 
-    # ORDEM DA LISTA (03/08/2026): as opções saem sempre na MESMA ordem — data mais
-    # recente primeiro e, no mesmo dia, do maior valor pro menor. Antes o `em_uso`
-    # entrava no fim direto de um `set` (sem ordem nenhuma) e a lista virava aquela
-    # bagunça do print. Aqui os dois grupos (candidatos do teto + rótulos em uso)
-    # viram um conjunto de IDs e são ordenados JUNTOS.
+    # ORDEM DA LISTA (03/08/2026): a lista sai SEMPRE do maior valor pro menor — a
+    # mesma ordem do rótulo, que agora começa pelo valor. Antes era por data e o
+    # `em_uso` entrava no fim direto de um `set` (sem ordem nenhuma): era a bagunça
+    # do print. Aqui os dois grupos (candidatos do teto + rótulos já escolhidos na
+    # página) viram um conjunto de IDs e são ordenados JUNTOS.
     ids_opcao = {s["id"] for s in cands[:MAX_OPCOES]} | {id_por_rotulo[r] for r in em_uso
                                                         if r in id_por_rotulo}
     opcoes = [OP_NENHUM] + [rotulo_por_id[s["id"]] for s in
-                            sorted((s for s in saidas if s["id"] in ids_opcao),
-                                   key=lambda s: (s["data"], abs(s["valor"])), reverse=True)]
+                            sorted((s for s in sd_por_id.values() if s["id"] in ids_opcao),
+                                   key=lambda s: (abs(s["valor"]), s["data"]), reverse=True)]
 
     if achados > MAX_OPCOES:
-        st.caption(f"A coluna **Pagamento** está com **{len(opcoes) - 1}** opções "
-                   f"(das {achados} saídas do período), **da mais recente pra mais "
-                   "antiga**. Entram as que ainda não foram conciliadas, das maiores "
-                   "pras menores, mais as que já estão escolhidas nesta página. "
-                   "**Para achar uma específica, use a busca acima** — a lista inteira "
-                   "no navegador é o que trava a tela.")
-    elif busca_pg.strip():
-        st.caption(f"🔎 **{achados}** pagamento(s) na busca «{busca_pg.strip()}».")
+        st.caption(f"A coluna **Pagamento** está com **{len(opcoes) - 1}** das "
+                   f"{achados} saídas do período, **do maior valor pro menor**. "
+                   "Pra achar uma específica **digite o valor na busca acima** "
+                   "(ex.: `2926`) — a lista inteira no navegador é o que trava a tela. "
+                   "Ou use o **🎯 Achar o pagamento** logo acima, que procura sozinho.")
+    elif _alvo:
+        st.caption(f"🔎 **{achados}** pagamento(s) com "
+                   + (f"valor contendo **{_alvo_dig}**" if _so_numero
+                      else f"nome «**{_alvo}**»") + ".")
 
+    # ─── ARRUMAR A TABELA ANTES DE DESENHAR (03/08/2026) ─────────────────────
+    # (1) A coluna Δ vira TEXTO: como número, a célula vazia (título ainda sem
+    #     pagamento) era desenhada pelo Streamlit como a palavra **"None"** em todas
+    #     as linhas 🔴 — foi o que apareceu no print do Filipe. Como texto, vazio é
+    #     vazio de verdade.
+    # (2) Se NENHUMA linha da página tem sugestão, as colunas 💡 e Ligar só roubam
+    #     largura do Fornecedor e do Pagamento — que é onde ele lê e escolhe. Some
+    #     com elas; era por isso que "COMPANHIA BRASILEIRA DE DISTRI" vinha cortado.
+    df_view = df_view.copy()
+    df_view["Δ (pago-prev)"] = ["" if pd.isna(v) else brl(v)
+                                for v in df_view["Δ (pago-prev)"]]
+    df_view["Previsto"] = [brl(v) for v in df_view["Previsto"]]
+    if not (df_view["💡 Sugestão do sistema"] != SEM_SUG).any():
+        df_view = df_view.drop(columns=["💡 Sugestão do sistema", "Ligar"])
+    # Δ só faz sentido quando existe pagamento ligado; vazia em todas as linhas ela só
+    # rouba largura de quem interessa.
+    if not (df_view["Δ (pago-prev)"] != "").any():
+        df_view = df_view.drop(columns=["Δ (pago-prev)"])
+
+    _cfg = {
+        "_tid": None, "_score": None,
+        "Status": st.column_config.TextColumn(disabled=True, width=85),
+        "Fornecedor": st.column_config.TextColumn(disabled=True, width=195),
+        "Venc. · Tipo": st.column_config.TextColumn(disabled=True, width=130),
+        "Previsto": st.column_config.TextColumn(disabled=True, width=95,
+                                                alignment="right"),
+        "💡 Sugestão do sistema": st.column_config.TextColumn(
+            disabled=True, width=230,
+            help="O pagamento mais parecido com ESTE título: mesma faixa de valor "
+                 "(±5%) e o nome mais próximo. Vem o motivo: 'valor igual' ou a "
+                 "diferença em reais, e o quanto o nome bate. Nada é ligado sozinho "
+                 "— você marca Ligar e salva."),
+        "Ligar": st.column_config.CheckboxColumn(
+            width=45, help="Marque pra gravar a baixa com o pagamento sugerido. "
+                                "Se você escolher algo na coluna Pagamento, aquela "
+                                "escolha manda e o Ligar é ignorado."),
+        "Pagamento": st.column_config.SelectboxColumn(
+            options=opcoes, width=190,
+            help="A lista vem do MAIOR valor pro menor e o rótulo começa pelo valor. "
+                 "Pra achar rápido, use o 🎯 acima ou digite o valor na busca."),
+        "Δ (pago-prev)": st.column_config.TextColumn(disabled=True, width=90,
+                                                     alignment="right"),
+    }
     editado = st.data_editor(
         df_view, hide_index=True, use_container_width=True,
         key=f"conf_editor_{rot_sel}_{pag}",   # por filtro E por página: edição não vaza
-        column_config={
-            "_tid": None, "_score": None,
-            "Status": st.column_config.TextColumn(disabled=True, width="small"),
-            "Fornecedor": st.column_config.TextColumn(disabled=True, width="medium"),
-            "Vencimento": st.column_config.TextColumn(disabled=True, width="small"),
-            "Tipo": st.column_config.TextColumn(disabled=True, width="small"),
-            "Previsto": st.column_config.NumberColumn(format="R$ %.2f", disabled=True),
-            "💡 Sugestão do sistema": st.column_config.TextColumn(
-                disabled=True, width="large",
-                help="O pagamento mais parecido com ESTE título: mesma faixa de valor "
-                     "(±5%) e o nome mais próximo. Vem o motivo: 'valor igual' ou a "
-                     "diferença em reais, e o quanto o nome bate. Nada é ligado sozinho "
-                     "— você marca Ligar e salva."),
-            "Ligar": st.column_config.CheckboxColumn(
-                width="small", help="Marque pra gravar a baixa com o pagamento sugerido. "
-                                    "Se você escolher algo na coluna Pagamento, aquela "
-                                    "escolha manda e o Ligar é ignorado."),
-            "Pagamento": st.column_config.SelectboxColumn(
-                options=opcoes, width="medium",
-                help="Só pra quando não houver sugestão (ou a sugestão estiver errada). "
-                     "Use a busca acima pra enxugar a lista."),
-            "Δ (pago-prev)": st.column_config.NumberColumn(format="R$ %.2f", disabled=True),
-        },
+        column_config={c: v for c, v in _cfg.items()
+                       if c in df_view.columns or v is None},
     )
 
     def _escolhido(r) -> int | None:
@@ -612,6 +799,12 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
         atual = {t["id"]: t["lancamento_id"] for t in titulos_db}
         for tid, sid in novos_vinc.items():
             if sid == atual.get(tid):
+                continue
+            # TRAVA (03/08/2026): só desfaz baixa se o pagamento atual estava mesmo na
+            # lista de opções — ou seja, se ele PODIA ter escolhido "— (não pago)" de
+            # propósito. Sem isso, qualquer título cuja saída não coubesse na lista
+            # (fora do período, fora do teto de opções) era desligado sozinho no Salvar.
+            if not sid and rotulo_por_id.get(atual.get(tid)) not in opcoes:
                 continue
             if sid:
                 s = sd_por_id[sid]

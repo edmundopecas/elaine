@@ -227,11 +227,51 @@ sem_titulo_ids = {s["id"] for s in res["saidas_sem_titulo"]}
 cobertos_ids = ({s["id"] for s in saidas_livres if s["id"] not in sem_titulo_ids}
                 | usadas_baixa)
 
+# ─── POR QUE ESTÁ FORA? — duas filas dentro do ❌ (02/08/2026) ────────────────
+# Reclamação do Filipe: "toda vez que baixo a planilha vem coisa nova" — o ❌ nunca
+# esvazia. MEDIDO no período 27–31/07: das 191 saídas fora do CPR, 151 eram de
+# categorias que praticamente NUNCA têm título no Argos (pagas direto pelo banco:
+# tarifa, folha via SISPAG, débito automático). Elas se repetem todo dia e afogam o
+# que de fato falta conferir.
+# A lista abaixo NÃO é palpite — é a taxa de casamento medida em JULHO INTEIRO
+# (saída de julho × título já conciliado):
+#     Outras Despesas Financeiras  470 saídas →   0 com título ( 0%)
+#     Salários                     132        →   5            ( 4%)
+#     Devoluções e Descontos       111        →   0            ( 0%)
+#     Taxas de Cartão/Adquirente    25        →   0            ( 0%)
+#     Empréstimos/Financiamentos    16        →   0            ( 0%)
+#     Consórcio                      7        →   0            ( 0%)
+# Só entra categoria com ~0% de casamento. IPTU (52%), MEI/Prestadores (44%),
+# ICMS sobre Compras (12%) e Pró-labore (12%) ficam DE FORA de propósito: aparecem
+# no CPR com frequência, então continuam na fila de conferir.
+# IMPORTANTE: isto NÃO marca ninguém como ✅ — a regra de 07/07 continua valendo
+# (nada vira "está no CPR" por dedução de categoria). Só separa o ❌ em duas filas,
+# e os três números do topo não mudam. Uma saída dessas categorias que TENHA título
+# casa normalmente e nem chega aqui (por isso a separação é de baixo risco: o pior
+# caso é uma cobrança dessas realmente faltar no CPR e cair na 2ª lista, não sumir).
+# Comparação por nome EXATO da categoria (normalizado) — de propósito: por pedaço,
+# "Salários" pegaria "13º Salário", que casa 100% no CPR. Editável sem medo.
+NATUREZA_FORA_CPR = {_norm(x) for x in (
+    "Outras Despesas Financeiras",   # tarifa, juros, IOF — o banco debita direto
+    "Salários",                      # folha via SISPAG/PAGSAL, não passa no CPR
+    "Devoluções e Descontos",        # estorno/devolução, não é pagamento de título
+    "Taxas de Cartão/Adquirente",
+    "Empréstimos/Financiamentos",    # amortização em débito automático
+    "Consórcio",
+)}
+
+
+def _natureza(plano) -> bool:
+    """A saída é de uma categoria que não passa pelo Contas a Pagar do Argos?"""
+    return _norm(plano or "") in NATUREZA_FORA_CPR
+
+
 linhas_saidas = []
 for s in sorted(saidas_reais, key=lambda x: -x["valor"]):
     coberto = s["id"] in cobertos_ids
     linhas_saidas.append({
         "_ok": coberto,
+        "_natureza": (not coberto) and _natureza(s["plano"]),
         "Data": pd.to_datetime(s["data"]).strftime("%d/%m/%Y"),
         "Empresa": s["empresa_apelido"], "Valor": s["valor"],
         "Fornecedor/Contraparte": s["contraparte"] or s["descricao"],
@@ -251,24 +291,69 @@ mc[2].metric("💸 Total (fora aplicações)", brl(tot_pago), f"{len(linhas_said
              delta_color="off")
 st.caption("Toda saída que saiu das contas (menos aplicação/transferência interna). "
            "**No CPR?**: ✅ **está** = casou com um título do CPR por **nome + valor** "
-           "(ou já foi conferida). **❌ NÃO está** = não achei título pra ela — é o que "
-           "falta lançar/conferir. Ficam no topo.")
-saidas_df = (pd.DataFrame(linhas_saidas)
-             .sort_values(["_ok", "Valor"], ascending=[True, False])
-             .drop(columns=["_ok"]))
-st.dataframe(saidas_df, hide_index=True, use_container_width=True,
-             column_config={"Valor": st.column_config.NumberColumn(format="R$ %.2f")})
+           "(ou já foi conferida). **❌ NÃO está** = não achei título pra ela.")
+
+_base_df = pd.DataFrame(linhas_saidas)
+_col_ordem = [c for c in _base_df.columns if c not in ("_ok", "_natureza")]
+
+
+def _fatia(mask) -> pd.DataFrame:
+    return (_base_df[mask].sort_values("Valor", ascending=False)[_col_ordem]
+            if len(_base_df) else _base_df)
+
+
+conferir_df = _fatia((~_base_df["_ok"]) & (~_base_df["_natureza"])) if len(_base_df) else _base_df
+natureza_df = _fatia(_base_df["_natureza"]) if len(_base_df) else _base_df
+dentro_df = _fatia(_base_df["_ok"]) if len(_base_df) else _base_df
+v_conf = float(conferir_df["Valor"].sum()) if len(conferir_df) else 0.0
+v_nat = float(natureza_df["Valor"].sum()) if len(natureza_df) else 0.0
+
+st.markdown(f"#### 🔎 Fora do CPR — **sem explicação: conferir** · {len(conferir_df)} "
+            f"saída(s) · {brl(v_conf)}")
+st.caption("É a fila de trabalho: saída que não casou com título **e** não é de uma "
+           "categoria que passa por fora do CPR. Se está aqui, ou falta lançar no "
+           "Argos, ou o título existe e precisa ser conciliado lá embaixo.")
+if len(conferir_df):
+    st.dataframe(conferir_df, hide_index=True, use_container_width=True,
+                 column_config={"Valor": st.column_config.NumberColumn(format="R$ %.2f")})
+else:
+    st.success("Nada pendente de explicação neste período. 🎉")
+
+with st.expander(f"🏦 Fora do CPR — **por natureza** (não passa no Argos) · "
+                 f"{len(natureza_df)} saída(s) · {brl(v_nat)}"):
+    st.caption("Tarifa/juros, folha via SISPAG, devolução/estorno, taxa de cartão, "
+               "amortização de empréstimo e consórcio: pagas direto pelo banco, sem "
+               "título no Contas a Pagar. Em julho inteiro essas categorias casaram com "
+               "título em ~0% das vezes — por isso saem da fila de conferir. Continuam "
+               "contadas como ❌ nos números acima: **nada aqui está marcado como ✅**.")
+    st.dataframe(natureza_df, hide_index=True, use_container_width=True,
+                 column_config={"Valor": st.column_config.NumberColumn(format="R$ %.2f")})
+
+with st.expander(f"✅ Está no CPR · {len(dentro_df)} saída(s) · {brl(tot_pago - v_fora)}"):
+    st.dataframe(dentro_df, hide_index=True, use_container_width=True,
+                 column_config={"Valor": st.column_config.NumberColumn(format="R$ %.2f")})
+
+saidas_df = _base_df.sort_values(["_ok", "_natureza", "Valor"],
+                                 ascending=[True, True, False]).copy()
+saidas_df.insert(len(_col_ordem), "Fila",
+                 ["✅ está no CPR" if ok else ("🏦 fora por natureza" if nat else "🔎 conferir")
+                  for ok, nat in zip(saidas_df["_ok"], saidas_df["_natureza"])])
+saidas_df = saidas_df.drop(columns=["_ok", "_natureza"])
 
 
 def _excel_conc() -> bytes:
     resumo = pd.DataFrame({
         "Indicador": ["Período", "Empresa", "Total de saídas (fora aplicações)",
-                      "Está no CPR (previsto)", "Diferença", "Saídas fora do CPR"],
+                      "Está no CPR (previsto)", "Diferença", "Saídas fora do CPR",
+                      "  ↳ fora: conferir", "  ↳ fora: por natureza (não passa no Argos)"],
         "Valor": [f"{d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}",
-                  sel_emp, tot_pago, tot_cpr, tot_dif, v_fora]})
+                  sel_emp, tot_pago, tot_cpr, tot_dif, v_fora, v_conf, v_nat]})
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xl:
         resumo.to_excel(xl, sheet_name="Resumo", index=False)
+        # aba nova: só a fila de trabalho (o que abrir primeiro)
+        conferir_df.to_excel(xl, sheet_name="Conferir", index=False)
+        # a aba de sempre continua com TUDO, agora com a coluna Fila
         saidas_df.to_excel(xl, sheet_name="Saídas (No CPR)", index=False)
     return buf.getvalue()
 

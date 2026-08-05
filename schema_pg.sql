@@ -152,3 +152,22 @@ ALTER TABLE titulos ADD COLUMN IF NOT EXISTS origem     TEXT DEFAULT 'manual';  
 ALTER TABLE titulos ADD COLUMN IF NOT EXISTS linha_hash TEXT;   -- dedup em reimport
 CREATE UNIQUE INDEX IF NOT EXISTS idx_titulos_hash
     ON titulos(linha_hash) WHERE linha_hash IS NOT NULL;
+
+-- BAIXA COM VÁRIOS PAGAMENTOS (04/08/2026) ------------------------------------
+-- `titulos.lancamento_id` só cabe UM pagamento por título, e a vida real tem os
+-- dois lados: o ICMS e o FECOEP da mesma nota saem do banco ora numa guia só
+-- (1 pagamento), ora em DUAS guias GNRE no mesmo dia (2 pagamentos) pra UM título
+-- do Argos — ex.: título ENERGEX 8100 R$ 21.319,92 = R$ 20.154,32 + R$ 1.165,60
+-- pagos em 24/07. E uma guia junta pode quitar mais de um título.
+-- Esta tabela é o vínculo N↔N. `titulos.lancamento_id` CONTINUA preenchido com o
+-- pagamento principal (o de maior valor) — as telas e relatórios antigos seguem
+-- funcionando sem saber que existe rateio.
+CREATE TABLE IF NOT EXISTS titulo_baixas (
+    id            SERIAL PRIMARY KEY,
+    titulo_id     INTEGER NOT NULL REFERENCES titulos(id) ON DELETE CASCADE,
+    lancamento_id INTEGER NOT NULL REFERENCES lancamentos(id) ON DELETE CASCADE,
+    criado_em     TEXT NOT NULL DEFAULT (now()::text)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_titulo_baixas_par
+    ON titulo_baixas(titulo_id, lancamento_id);
+CREATE INDEX IF NOT EXISTS idx_titulo_baixas_lanc ON titulo_baixas(lancamento_id);

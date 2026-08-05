@@ -147,3 +147,15 @@ CREATE INDEX IF NOT EXISTS idx_titulos_venc    ON titulos(vencimento);
 CREATE INDEX IF NOT EXISTS idx_titulos_empresa ON titulos(empresa_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_titulos_hash
     ON titulos(linha_hash) WHERE linha_hash IS NOT NULL;
+
+-- Baixa com VÁRIOS pagamentos (04/08/2026) — ver comentário no schema_pg.sql.
+-- Vínculo N↔N título ↔ pagamento; `titulos.lancamento_id` segue com o principal.
+CREATE TABLE IF NOT EXISTS titulo_baixas (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    titulo_id     INTEGER NOT NULL REFERENCES titulos(id) ON DELETE CASCADE,
+    lancamento_id INTEGER NOT NULL REFERENCES lancamentos(id) ON DELETE CASCADE,
+    criado_em     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_titulo_baixas_par
+    ON titulo_baixas(titulo_id, lancamento_id);
+CREATE INDEX IF NOT EXISTS idx_titulo_baixas_lanc ON titulo_baixas(lancamento_id);

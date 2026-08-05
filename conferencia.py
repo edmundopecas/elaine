@@ -308,3 +308,66 @@ def sugerir(titulos: list[dict], saidas: list[dict], *, tol_rel: float = 0.05,
                       "sim": sim, "forte": forte}
         usadas.add(s["id"])
     return escolha
+
+
+# ─── Título pago em DUAS guias (ICMS + FECOEP) ───────────────────────────────
+def sugerir_combos(titulos: list[dict], saidas: list[dict], *,
+                   ignorar_categorias: frozenset = frozenset(),
+                   janela_dias: int = 7, max_por_titulo: int = 3,
+                   teto_grupo: int = 150) -> dict[int, list[dict]]:
+    """
+    Para cada título SEM pagamento, acha **pares de saídas que somam o valor dele**.
+
+    Por que existe (04/08/2026): o Argos lança UM título com o ICMS+FECOEP da nota,
+    mas o banco às vezes paga em DUAS guias GNRE. O `casar` e o `sugerir` são 1-p/-1,
+    então esses títulos nunca fechavam. MEDIDO em julho: ENERGEX R$ 21.319,92 =
+    20.154,32 + 1.165,60; W1 R$ 1.261,58 = 1.192,89 + 68,69; CAMBUCI R$ 50,32 =
+    47,97 + 2,35; PADRE CICERO R$ 28,56 = 27,23 + 1,33.
+
+    REGRA APERTADA — as três condições juntas, medidas na base de junho+julho:
+      • as duas saídas no MESMO DIA;
+      • as duas na MESMA CATEGORIA (plano de contas);
+      • a soma **exata** (≤1 centavo) e o dia dentro de ±`janela_dias` do vencimento.
+
+    Só soma exata, sem mesmo dia e sem mesma categoria, devolvia **232** "achados"
+    (tarifa de R$ 0,44 + tarifa de R$ 27,50 fechando um título de R$ 28,56...). Com as
+    três, caiu pra 11 pares — e passando `ignorar_categorias` com as naturezas que não
+    passam no CPR (tarifa, devolução, salário) sobram ~6, dos quais os 4 de ICMS são
+    verdadeiros. É palpite pra CONFERIR, nunca pra ligar sozinho.
+
+    titulos: dicts com valor e vencimento (a chave `_tid` é preservada pela tela).
+    saidas:  dicts com id, data, valor, plano.
+    Devolve {índice do título: [{"saidas": [s1, s2], "dia": "2026-07-24"}, ...]}.
+    """
+    if not titulos or not saidas:
+        return {}
+
+    # títulos indexados por valor em CENTAVOS (inteiro — comparar float dava 0.01 de
+    # ruído a cada soma) → achar "quem custa exatamente isto" é O(1).
+    por_centavos: dict[int, list[int]] = {}
+    for i, t in enumerate(titulos):
+        por_centavos.setdefault(int(round(float(t["valor"]) * 100)), []).append(i)
+
+    grupos: dict[tuple, list[dict]] = {}
+    for s in saidas:
+        cat = _norm(s.get("plano") or "")
+        if cat in ignorar_categorias:
+            continue
+        grupos.setdefault((str(s["data"])[:10], cat), []).append(s)
+
+    achados: dict[int, list[dict]] = {}
+    for (dia, _cat), grupo in grupos.items():
+        if len(grupo) > teto_grupo:      # dia com centenas de lançamentos na mesma
+            grupo = sorted(grupo, key=lambda s: -float(s["valor"]))[:teto_grupo]
+        for a in range(len(grupo)):
+            ca = int(round(float(grupo[a]["valor"]) * 100))
+            for b in range(a + 1, len(grupo)):
+                alvo = ca + int(round(float(grupo[b]["valor"]) * 100))
+                for i in por_centavos.get(alvo, []):
+                    venc = str(titulos[i].get("vencimento") or "")[:10]
+                    if venc and abs((pd.Timestamp(dia) - pd.Timestamp(venc)).days) > janela_dias:
+                        continue
+                    lista = achados.setdefault(i, [])
+                    if len(lista) < max_por_titulo:
+                        lista.append({"saidas": [grupo[a], grupo[b]], "dia": dia})
+    return achados

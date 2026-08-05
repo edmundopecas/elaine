@@ -37,15 +37,28 @@ import conferencia as _motor
 if not hasattr(_motor, "sugerir"):
     importlib.reload(_motor)          # atualiza sys.modules['conferencia'] no lugar
 
+import baixas
 from conferencia import (_norm, bucket_categoria, casar, parse_a_pagar, similaridade,
-                         sugerir)
-from db import execute, executemany, query, query_one
+                         sugerir, sugerir_combos)
+from db import executemany, query, query_one
 
 
 def brl(v) -> str:
     if v is None:
         return "—"
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def brl_md(v) -> str:
+    """Dinheiro pra ser escrito em **markdown** (st.info/warning/markdown/caption).
+
+    Por que existe (04/08/2026, visto na tela): o Streamlit trata `$…$` como fórmula
+    LaTeX. Num texto com DOIS valores — "R$ 20.154,32 + R$ 1.165,60" — ele lê tudo
+    entre os dois cifrões como matemática e escreve o miolo em monoespaçado, comendo
+    o «$» e a formatação. Escapando o cifrão o texto sai como dinheiro mesmo.
+    Só pra markdown: em tabela/Excel o `\\$` apareceria literal, lá continua o `brl`.
+    """
+    return brl(v).replace("R$", "R\\$")
 
 
 def brl_ord(valores) -> list[str]:
@@ -73,6 +86,49 @@ def brl_ord(valores) -> list[str]:
 # está no CPR" — sem lista de exceção por categoria. A tela é uma conferência crua do
 # que está e do que não está; nada é marcado "✅" por dedução de categoria (isso
 # mentia "sim" pra tarifa/devolução/folha que não passam no CPR e quebrava a confiança).
+
+# Dinheiro que anda entre as contas do grupo não é pagamento de título.
+_EXCLUIR_PAGO = ("aplicac", "resgate", "transferencia entre empresas")
+
+# ─── POR QUE ESTÁ FORA? — duas filas dentro do ❌ (02/08/2026) ────────────────
+# Reclamação do Filipe: "toda vez que baixo a planilha vem coisa nova" — o ❌ nunca
+# esvazia. MEDIDO no período 27–31/07: das 191 saídas fora do CPR, 151 eram de
+# categorias que praticamente NUNCA têm título no Argos (pagas direto pelo banco:
+# tarifa, folha via SISPAG, débito automático). Elas se repetem todo dia e afogam o
+# que de fato falta conferir.
+# A lista abaixo NÃO é palpite — é a taxa de casamento medida em JULHO INTEIRO
+# (saída de julho × título já conciliado):
+#     Outras Despesas Financeiras  470 saídas →   0 com título ( 0%)
+#     Salários                     132        →   5            ( 4%)
+#     Devoluções e Descontos       111        →   0            ( 0%)
+#     Taxas de Cartão/Adquirente    25        →   0            ( 0%)
+#     Empréstimos/Financiamentos    16        →   0            ( 0%)
+#     Consórcio                      7        →   0            ( 0%)
+# Só entra categoria com ~0% de casamento. IPTU (52%), MEI/Prestadores (44%),
+# ICMS sobre Compras (12%) e Pró-labore (12%) ficam DE FORA de propósito: aparecem
+# no CPR com frequência, então continuam na fila de conferir.
+# IMPORTANTE: isto NÃO marca ninguém como ✅ — a regra de 07/07 continua valendo
+# (nada vira "está no CPR" por dedução de categoria). Só separa o ❌ em duas filas,
+# e os três números do topo não mudam. Uma saída dessas categorias que TENHA título
+# casa normalmente e nem chega aqui (por isso a separação é de baixo risco: o pior
+# caso é uma cobrança dessas realmente faltar no CPR e cair na 2ª lista, não sumir).
+# Comparação por nome EXATO da categoria (normalizado) — de propósito: por pedaço,
+# "Salários" pegaria "13º Salário", que casa 100% no CPR. Editável sem medo.
+# (04/08/2026: também é a lista que o `sugerir_combos` ignora ao procurar título
+# pago em DUAS guias — sem ela, tarifa de centavos soma qualquer valor.)
+NATUREZA_FORA_CPR = frozenset(_norm(x) for x in (
+    "Outras Despesas Financeiras",   # tarifa, juros, IOF — o banco debita direto
+    "Salários",                      # folha via SISPAG/PAGSAL, não passa no CPR
+    "Devoluções e Descontos",        # estorno/devolução, não é pagamento de título
+    "Taxas de Cartão/Adquirente",
+    "Empréstimos/Financiamentos",    # amortização em débito automático
+    "Consórcio",
+))
+
+
+def _natureza(plano) -> bool:
+    """A saída é de uma categoria que não passa pelo Contas a Pagar do Argos?"""
+    return _norm(plano or "") in NATUREZA_FORA_CPR
 
 
 st.title("⚖️ Conferência — Contas a Pagar × Pagamentos")
@@ -181,13 +237,18 @@ if not titulos_db:
     st.stop()
 
 # ─── 3) Casamento (só dos títulos ainda abertos) ─────────────────────────────
+# BAIXA COM VÁRIOS PAGAMENTOS (04/08/2026): quem manda agora é `titulo_baixas`
+# (N↔N, ver baixas.py) — um título de ICMS pode ter sido pago em DUAS guias GNRE no
+# mesmo dia. `titulos.lancamento_id` continua preenchido com o principal, então
+# `baixas.por_titulo` devolve a união dos dois e nada se perde.
 sd_por_id = {s["id"]: s for s in saidas}
+baixas_por_tid = baixas.por_titulo([t["id"] for t in titulos_db])
 abertos = [{"_tid": t["id"], "fornecedor": t["contraparte"] or "", "valor": t["valor"],
             "vencimento": t["vencimento"], "documento": t["documento"],
             "tipo_docto": t["tipo_docto"], "loja": t["loja"],
             "empresa": next((e["apelido"] for e in empresas if e["id"] == t["empresa_id"]), None)}
-           for t in titulos_db if not t["lancamento_id"]]
-ja_baixados = [t for t in titulos_db if t["lancamento_id"]]
+           for t in titulos_db if not baixas_por_tid.get(t["id"])]
+ja_baixados = [t for t in titulos_db if baixas_por_tid.get(t["id"])]
 
 # ─── PAGAMENTO FORA DO PERÍODO (03/08/2026) — BUG GRAVE, achado no teste ──────
 # Um título já conciliado com uma saída de FORA do período aberto (baixa feita em
@@ -197,8 +258,8 @@ ja_baixados = [t for t in titulos_db if t["lancamento_id"]]
 # 50 títulos por página de uma vez, sem avisar. Buscando esses lançamentos à parte,
 # o rótulo existe, a célula mostra o pagamento certo e o salvar não mexe em nada.
 # (O `if` do salvar também ganhou uma trava, ver lá embaixo.)
-_ids_fora = [t["lancamento_id"] for t in ja_baixados
-             if t["lancamento_id"] and t["lancamento_id"] not in sd_por_id]
+_ids_fora = [lid for t in ja_baixados for lid in baixas_por_tid.get(t["id"], [])
+             if lid not in sd_por_id]
 if _ids_fora:
     _ph = ",".join(["?"] * len(_ids_fora))
     for _s in query(f"""SELECT l.id, l.data, l.valor, l.contraparte, l.descricao,
@@ -210,8 +271,11 @@ if _ids_fora:
         sd_por_id[_s["id"]] = _s
 
 # saídas já usadas por baixas existentes não podem ser sugeridas de novo
-usadas_baixa = {t["lancamento_id"] for t in ja_baixados}
-saidas_livres = [s for s in saidas if s["id"] not in usadas_baixa]
+# (mapa global: um pagamento pode ter quitado título de OUTRO período — é o que
+# permite o caso "guia junta" e o que alimenta a coluna Situação do 🎯)
+titulos_da_saida = baixas.titulos_por_lancamento()
+usadas_baixa = {lid for t in ja_baixados for lid in baixas_por_tid.get(t["id"], [])}
+saidas_livres = [s for s in saidas if s["id"] not in titulos_da_saida]
 res = casar(abertos, saidas_livres)
 
 # ─── PALPITE pros 🔴 (02/08/2026) ────────────────────────────────────────────
@@ -226,6 +290,19 @@ disponiveis = [s for s in saidas_livres if s["id"] not in usadas_casar]
 sem_pgto = [t for t in res["titulos"] if t["_status"] == "sem_saida"]
 sug_por_tid = {sem_pgto[i]["_tid"]: inf
                for i, inf in sugerir(sem_pgto, disponiveis).items()}
+
+# ─── PAGO EM DUAS GUIAS (04/08/2026) ─────────────────────────────────────────
+# Pedido do Filipe: "paga ICMS e FECOEP às vezes em guias juntas e às vezes
+# separadas; queria pegar os dois pagamentos e ligar com 1 do que está lançado no
+# financeiro". O `sugerir` é 1-p/-1, então esses títulos ficavam eternamente 🔴.
+# O `sugerir_combos` procura DOIS pagamentos do mesmo dia, mesma categoria, que
+# somem o valor exato do título. MEDIDO em julho: achou 4 e acertou os 4 (ENERGEX
+# 21.319,92 = 20.154,32 + 1.165,60; W1 1.261,58; CAMBUCI 50,32; PADRE CICERO 28,56),
+# sem nenhum falso positivo. Continua valendo a regra: nada é ligado sozinho.
+combo_por_tid = {sem_pgto[i]["_tid"]: lista[0]
+                 for i, lista in sugerir_combos(
+                     sem_pgto, disponiveis,
+                     ignorar_categorias=NATUREZA_FORA_CPR).items()}
 
 # ─── Monta as opções do seletor de pagamento ─────────────────────────────────
 # ORDEM DO RÓTULO (03/08/2026): o VALOR vem primeiro. Antes era "data · nome · valor"
@@ -243,6 +320,16 @@ def _rotulo_saida(s: dict) -> str:
 OP_NENHUM = "— (não pago)"
 rotulo_por_id = {s["id"]: _rotulo_saida(s) for s in sd_por_id.values()}
 id_por_rotulo = {v: k for k, v in rotulo_por_id.items()}
+
+
+# TÍTULO PAGO EM 2+ GUIAS (04/08/2026): a coluna Pagamento é um selectbox com UMA
+# lista pra tabela inteira — não tem como mostrar dois pagamentos numa célula. Então
+# o conjunto ganha um rótulo próprio, que entra na lista de opções (obrigatório: se o
+# valor da célula não estiver nas opções, o Streamlit desenha a célula VAZIA e o
+# Salvar leria isso como "sem pagamento"). O nº do título no fim garante que dois
+# títulos com a mesma soma não compartilhem rótulo.
+def _rotulo_multi(tid: int, ss: list[dict]) -> str:
+    return (f"🔗 {len(ss)} pagamentos · {brl(sum(s['valor'] for s in ss))} · nº {tid}")
 
 # TETO DO DROPDOWN (02/08/2026) — por que existe:
 # o SelectboxColumn manda TODAS as opções pro navegador e as materializa ao abrir a
@@ -283,27 +370,48 @@ def _texto_sug(inf: dict) -> str:
     return f"{d} · {nome} · {motivo} · nome {inf['sim']:.0%}"
 
 
+def _texto_combo(c: dict) -> str:
+    """O par de guias escrito por extenso: «24/07 · 2 pagamentos somam exato ·
+    20.154,32 + 1.165,60»."""
+    d = pd.to_datetime(c["dia"]).strftime("%d/%m")
+    return (f"{d} · 2 pagamentos somam exato · "
+            + " + ".join(brl(s["valor"]).replace("R$ ", "") for s in c["saidas"]))
+
+
 linhas = []
+tid_do_rotulo_multi: dict[str, int] = {}   # rótulo "🔗 2 pagamentos…" -> título
 # títulos já baixados (conferidos) aparecem no topo, travados como 🟢
 for t in ja_baixados:
-    s = sd_por_id.get(t["lancamento_id"])
-    dif = round((s["valor"] - t["valor"]), 2) if s else None
-    linhas.append({"_tid": t["id"], "_score": -1.0, "Status": "🟢 conferido",
+    lids = baixas_por_tid.get(t["id"], [])
+    ss = [sd_por_id[l] for l in lids if l in sd_por_id]
+    dif = round(sum(s["valor"] for s in ss) - t["valor"], 2) if ss else None
+    if len(ss) > 1:
+        rot = _rotulo_multi(t["id"], ss)
+        tid_do_rotulo_multi[rot] = t["id"]
+    else:
+        rot = rotulo_por_id.get(lids[0], OP_NENHUM) if lids else OP_NENHUM
+    linhas.append({"_tid": t["id"], "_score": -1.0,
+                   "Status": "🟢 conferido" + (" (2 guias)" if len(ss) > 1 else ""),
                    "Fornecedor": t["contraparte"],
                    "Venc. · Tipo": _venc_tipo(t["vencimento"], t["tipo_docto"]),
                    "Previsto": t["valor"],
                    "💡 Sugestão do sistema": SEM_SUG, "Ligar": False,
-                   "Pagamento": rotulo_por_id.get(t["lancamento_id"], OP_NENHUM),
-                   "Δ (pago-prev)": dif})
+                   "Pagamento": rot, "Δ (pago-prev)": dif})
 for t in res["titulos"]:
     s = t["_saida"]
     inf = sug_por_tid.get(t["_tid"])
-    linhas.append({"_tid": t["_tid"], "_score": inf["score"] if inf else -1.0,
+    combo = combo_por_tid.get(t["_tid"])
+    # o par de guias tem prioridade na coluna 💡: soma EXATA vale mais que o palpite
+    # 1-p/-1 (que aceita ±5% de diferença).
+    texto = (_texto_combo(combo) if combo else
+             (_texto_sug(inf) if inf else SEM_SUG))
+    linhas.append({"_tid": t["_tid"],
+                   "_score": 1.0 if combo else (inf["score"] if inf else -1.0),
                    "Status": f"{EMOJI[t['_status']]} {ROTULO_STATUS[t['_status']]}",
                    "Fornecedor": t["fornecedor"],
                    "Venc. · Tipo": _venc_tipo(t["vencimento"], t["tipo_docto"]),
                    "Previsto": t["valor"],
-                   "💡 Sugestão do sistema": _texto_sug(inf) if inf else SEM_SUG,
+                   "💡 Sugestão do sistema": texto,
                    "Ligar": False,
                    "Pagamento": rotulo_por_id.get(s["id"], OP_NENHUM) if s else OP_NENHUM,
                    "Δ (pago-prev)": t["_diferenca"]})
@@ -315,8 +423,8 @@ df["Δ (pago-prev)"] = pd.to_numeric(df["Δ (pago-prev)"], errors="coerce")
 
 # ─── OS 3 NÚMEROS ────────────────────────────────────────────────────────────
 # Total pago FORA aplicação/resgate E transferência entre empresas (dinheiro andando
-# entre as contas do grupo — não é pagamento de verdade; Filipe confirmou tirar).
-_EXCLUIR_PAGO = ("aplicac", "resgate", "transferencia entre empresas")
+# entre as contas do grupo — não é pagamento de verdade; Filipe confirmou tirar,
+# a lista `_EXCLUIR_PAGO` está lá em cima junto das outras regras da tela).
 saidas_reais = [s for s in saidas
                 if not any(k in _norm(s["plano"] or "") for k in _EXCLUIR_PAGO)]
 tot_pago = sum(s["valor"] for s in saidas_reais)
@@ -338,45 +446,6 @@ k[2].metric("↔️ Diferença", brl(tot_dif), delta_color="off",
 sem_titulo_ids = {s["id"] for s in res["saidas_sem_titulo"]}
 cobertos_ids = ({s["id"] for s in saidas_livres if s["id"] not in sem_titulo_ids}
                 | usadas_baixa)
-
-# ─── POR QUE ESTÁ FORA? — duas filas dentro do ❌ (02/08/2026) ────────────────
-# Reclamação do Filipe: "toda vez que baixo a planilha vem coisa nova" — o ❌ nunca
-# esvazia. MEDIDO no período 27–31/07: das 191 saídas fora do CPR, 151 eram de
-# categorias que praticamente NUNCA têm título no Argos (pagas direto pelo banco:
-# tarifa, folha via SISPAG, débito automático). Elas se repetem todo dia e afogam o
-# que de fato falta conferir.
-# A lista abaixo NÃO é palpite — é a taxa de casamento medida em JULHO INTEIRO
-# (saída de julho × título já conciliado):
-#     Outras Despesas Financeiras  470 saídas →   0 com título ( 0%)
-#     Salários                     132        →   5            ( 4%)
-#     Devoluções e Descontos       111        →   0            ( 0%)
-#     Taxas de Cartão/Adquirente    25        →   0            ( 0%)
-#     Empréstimos/Financiamentos    16        →   0            ( 0%)
-#     Consórcio                      7        →   0            ( 0%)
-# Só entra categoria com ~0% de casamento. IPTU (52%), MEI/Prestadores (44%),
-# ICMS sobre Compras (12%) e Pró-labore (12%) ficam DE FORA de propósito: aparecem
-# no CPR com frequência, então continuam na fila de conferir.
-# IMPORTANTE: isto NÃO marca ninguém como ✅ — a regra de 07/07 continua valendo
-# (nada vira "está no CPR" por dedução de categoria). Só separa o ❌ em duas filas,
-# e os três números do topo não mudam. Uma saída dessas categorias que TENHA título
-# casa normalmente e nem chega aqui (por isso a separação é de baixo risco: o pior
-# caso é uma cobrança dessas realmente faltar no CPR e cair na 2ª lista, não sumir).
-# Comparação por nome EXATO da categoria (normalizado) — de propósito: por pedaço,
-# "Salários" pegaria "13º Salário", que casa 100% no CPR. Editável sem medo.
-NATUREZA_FORA_CPR = {_norm(x) for x in (
-    "Outras Despesas Financeiras",   # tarifa, juros, IOF — o banco debita direto
-    "Salários",                      # folha via SISPAG/PAGSAL, não passa no CPR
-    "Devoluções e Descontos",        # estorno/devolução, não é pagamento de título
-    "Taxas de Cartão/Adquirente",
-    "Empréstimos/Financiamentos",    # amortização em débito automático
-    "Consórcio",
-)}
-
-
-def _natureza(plano) -> bool:
-    """A saída é de uma categoria que não passa pelo Contas a Pagar do Argos?"""
-    return _norm(plano or "") in NATUREZA_FORA_CPR
-
 
 linhas_saidas = []
 for s in sorted(saidas_reais, key=lambda x: -x["valor"]):
@@ -498,8 +567,11 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
                "título** — escolha o título e o sistema lista os pagamentos mais "
                "parecidos **com ele**, do valor mais próximo pro mais distante. "
                "Use o 🎯 quando não houver sugestão: é onde antes você penava no "
-               "dropdown. Ordem da tabela: 🔴 com sugestão no topo, depois 🔴 sem "
-               "sugestão, 🟡 só valor, 🟢 casados e conferidos.")
+               "dropdown. **Pago em duas guias** (ICMS + FECOEP separados)? No 🎯 dá "
+               "pra marcar **duas linhas** e ligar as duas ao mesmo título — e quando "
+               "as duas somam exato o sistema já avisa. Ordem da tabela: 🔴 com "
+               "sugestão no topo, depois 🔴 sem sugestão, 🟡 só valor, 🟢 casados e "
+               "conferidos.")
 
     def _ordem(r) -> int:
         s = r["Status"]
@@ -592,10 +664,28 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
             tid_sel = _op_tit[_rot_tit]
             t_sel = next(t for t in titulos_db if t["id"] == tid_sel)
 
+            # ─── ATALHO: este título foi pago em DUAS guias? (04/08/2026) ────
+            # Quando o `sugerir_combos` acha o par (ICMS + FECOEP do mesmo dia
+            # somando exato), ele aparece aqui pronto pra ligar de uma vez.
+            _cb = combo_por_tid.get(tid_sel)
+            if _cb:
+                _dc = pd.to_datetime(_cb["dia"]).strftime("%d/%m")
+                _det = " + ".join(
+                    f"**{brl_md(s['valor'])}** ({(s['contraparte'] or s['descricao'] or '')[:26]})"
+                    for s in _cb["saidas"])
+                st.info(f"💡 **Parece pago em 2 guias no dia {_dc}:** {_det} = "
+                        f"**{brl_md(sum(s['valor'] for s in _cb['saidas']))}**, exatamente o "
+                        f"valor do título. (É o caso do ICMS + FECOEP.)")
+                if st.button("🔗 Ligar os 2 pagamentos a este título", type="primary",
+                             key=f"conf_ligar_combo_{tid_sel}"):
+                    baixas.ligar(tid_sel, _cb["saidas"])
+                    st.success("Conciliado com os 2 pagamentos! O título saiu da fila.")
+                    st.rerun()
+
             # saída que o `casar` já apontou pra OUTRO título: não some da lista (pode
             # ser justamente a certa aqui), mas vem marcada pra ele saber.
             _usado_por = {t["_saida"]["id"] for t in res["titulos"] if t["_saida"]}
-            _co = st.columns([2, 1])
+            _co = st.columns([2, 1, 1])
             _ordem = _co[0].radio("Ordenar os pagamentos por",
                                   ["💰 valor mais próximo", "🔤 nome mais parecido"],
                                   horizontal=True, key="conf_cand_ordem")
@@ -606,7 +696,17 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
             # desconfiar que a saída foi classificada errado, marca a caixinha.
             _tudo = _co[1].checkbox("Incluir aplicações e transferências internas",
                                     key="conf_cand_tudo")
-            _pool = [s for s in saidas_livres
+            # GUIA JUNTA (04/08/2026): quando o banco paga ICMS+FECOEP numa guia só,
+            # aquele ÚNICO pagamento pode quitar MAIS DE UM título do Argos. Pagamento
+            # já conciliado fica fora da lista por padrão (senão os 25 candidatos de um
+            # título comum viriam quase todos já usados); marcando aqui, ele aparece
+            # com o nº do título que já quitou.
+            _reusar = _co[2].checkbox("Incluir pagamentos já conciliados",
+                                      key="conf_cand_reusar",
+                                      help="Pro caso da GUIA JUNTA: um pagamento só "
+                                           "que quita dois títulos do CPR.")
+            _base_pool = saidas if _reusar else saidas_livres
+            _pool = [s for s in _base_pool
                      if _tudo or not any(k in _norm(s["plano"] or "")
                                          for k in _EXCLUIR_PAGO)]
             _alvo_v = float(t_sel["valor"])
@@ -626,6 +726,12 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
                            f"mais parecido dá {max(sm for _, sm, _ in _cand):.0%}. "
                            "Provavelmente este título **não foi pago** nestas datas (ou "
                            "foi pago por uma conta que ainda não foi importada).")
+            def _situacao(s: dict) -> str:
+                outros = [t for t in titulos_da_saida.get(s["id"], []) if t != tid_sel]
+                if outros:
+                    return "🔗 já quita o título nº " + ", ".join(str(o) for o in outros)
+                return "🔗 já sugerido a outro" if s["id"] in _usado_por else "🆓 livre"
+
             _cdf = pd.DataFrame([{
                 "Data": pd.to_datetime(s["data"]).strftime("%d/%m"),
                 "Valor pago": s["valor"],
@@ -633,12 +739,14 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
                 "Favorecido no extrato": s["contraparte"] or s["descricao"],
                 "Nome bate": f"{sim:.0%}",
                 "Empresa": s["empresa_apelido"],
-                "Situação": "🔗 já sugerido a outro" if s["id"] in _usado_por else "🆓 livre",
+                "Situação": _situacao(s),
                 "Nº": s["id"]} for dif, sim, s in _cand])
             _cdf["Valor pago"] = brl_ord(_cdf["Valor pago"])
+            # MULTI-SELEÇÃO (04/08/2026): marcar DUAS linhas liga as duas guias ao
+            # mesmo título — é o pedido do ICMS+FECOEP pagos separados.
             _ev = st.dataframe(
                 _cdf, hide_index=True, use_container_width=True,
-                on_select="rerun", selection_mode="single-row",
+                on_select="rerun", selection_mode="multi-row",
                 key=f"conf_cand_{tid_sel}",
                 column_config={
                     "Valor pago": st.column_config.TextColumn(width="small",
@@ -651,21 +759,40 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
                     "Situação": st.column_config.TextColumn(width="medium")})
             _sel = list(_ev.selection.rows) if _ev and _ev.selection else []
             if _sel:
-                _esc = _cand[_sel[0]][2]
-                _d = pd.to_datetime(_esc["data"]).strftime("%d/%m")
-                st.warning(f"**{t_sel['contraparte']}** · previsto {brl(t_sel['valor'])} "
-                           f"→ pagamento de **{_d}** · "
-                           f"{_esc['contraparte'] or _esc['descricao']} · "
-                           f"**{brl(_esc['valor'])}** (Δ {brl(_esc['valor'] - t_sel['valor'])}).")
-                if st.button("🔗 Ligar este pagamento ao título", type="primary",
-                             key="conf_ligar_um"):
-                    execute("UPDATE titulos SET lancamento_id=?, status='pago', "
-                            "data_baixa=? WHERE id=?", (_esc["id"], _esc["data"], tid_sel))
-                    st.success("Conciliado! O título já saiu da fila.")
+                _escs = [_cand[i][2] for i in _sel]
+                _soma = sum(s["valor"] for s in _escs)
+                _delta = round(_soma - float(t_sel["valor"]), 2)
+                _desc = " + ".join(
+                    f"**{brl_md(s['valor'])}** de {pd.to_datetime(s['data']).strftime('%d/%m')} "
+                    f"({(s['contraparte'] or s['descricao'] or '')[:24]})" for s in _escs)
+                st.warning(f"**{t_sel['contraparte']}** · previsto "
+                           f"{brl_md(t_sel['valor'])} → {_desc}"
+                           + (f" = **{brl_md(_soma)}**" if len(_escs) > 1 else "")
+                           + f" · Δ {brl_md(_delta)}"
+                           + ("  ✅ **fecha exato**" if abs(_delta) <= 0.01 else ""))
+                # já conciliado noutro título: pode ser a guia junta, mas ele tem que
+                # ver isso escrito antes de gravar (nada some sem aviso).
+                _reuso = [(s, [t for t in titulos_da_saida.get(s["id"], []) if t != tid_sel])
+                          for s in _escs]
+                _reuso = [(s, o) for s, o in _reuso if o]
+                if _reuso:
+                    st.info("ℹ️ " + " · ".join(
+                        f"O pagamento #{s['id']} já quita o(s) título(s) nº "
+                        + ", ".join(str(x) for x in o) for s, o in _reuso)
+                        + ". Ligando aqui também, ele passa a quitar os dois (é o caso "
+                          "da **guia junta**). A baixa do outro título continua de pé.")
+                _rot_bt = ("🔗 Ligar este pagamento ao título" if len(_escs) == 1
+                           else f"🔗 Ligar os {len(_escs)} pagamentos a este título")
+                if st.button(_rot_bt, type="primary", key="conf_ligar_um"):
+                    baixas.ligar(tid_sel, _escs)
+                    st.success(f"Conciliado com {len(_escs)} pagamento(s)! "
+                               "O título já saiu da fila.")
                     st.rerun()
             else:
                 st.caption("👆 Clique na **caixinha à esquerda** da linha do pagamento "
-                           "certo — aí aparece o botão pra ligar. Nada é ligado sozinho.")
+                           "certo — aí aparece o botão pra ligar. Pode marcar **mais de "
+                           "uma** (ICMS + FECOEP pagos em guias separadas): o sistema "
+                           "soma e mostra se fecha o valor do título. Nada é ligado sozinho.")
 
     # ─── Opções do dropdown "Pagamento" (busca + teto — ver MAX_OPCOES) ───────
     busca_pg = st.text_input(
@@ -720,9 +847,14 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
     # página) viram um conjunto de IDs e são ordenados JUNTOS.
     ids_opcao = {s["id"] for s in cands[:MAX_OPCOES]} | {id_por_rotulo[r] for r in em_uso
                                                         if r in id_por_rotulo}
-    opcoes = [OP_NENHUM] + [rotulo_por_id[s["id"]] for s in
-                            sorted((s for s in sd_por_id.values() if s["id"] in ids_opcao),
-                                   key=lambda s: (abs(s["valor"]), s["data"]), reverse=True)]
+    # os rótulos de título pago em 2+ guias ("🔗 2 pagamentos · … · nº 1049") não têm
+    # id de lançamento — entram à parte, senão a célula do título já conferido em duas
+    # guias apareceria VAZIA e o Salvar leria como "não pago" (o bug de 03/08).
+    multi_na_pagina = [r for r in df_view["Pagamento"] if r in tid_do_rotulo_multi]
+    opcoes = ([OP_NENHUM] + sorted(set(multi_na_pagina))
+              + [rotulo_por_id[s["id"]] for s in
+                 sorted((s for s in sd_por_id.values() if s["id"] in ids_opcao),
+                        key=lambda s: (abs(s["valor"]), s["data"]), reverse=True)])
 
     if achados > MAX_OPCOES:
         st.caption(f"A coluna **Pagamento** está com **{len(opcoes) - 1}** das "
@@ -765,10 +897,13 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
             disabled=True, width=230,
             help="O pagamento mais parecido com ESTE título: mesma faixa de valor "
                  "(±5%) e o nome mais próximo. Vem o motivo: 'valor igual' ou a "
-                 "diferença em reais, e o quanto o nome bate. Nada é ligado sozinho "
+                 "diferença em reais, e o quanto o nome bate. Quando aparece "
+                 "'2 pagamentos somam exato', são DUAS guias do mesmo dia (ICMS + "
+                 "FECOEP) que fecham o valor do título. Nada é ligado sozinho "
                  "— você marca Ligar e salva."),
         "Ligar": st.column_config.CheckboxColumn(
-            width=45, help="Marque pra gravar a baixa com o pagamento sugerido. "
+            width=45, help="Marque pra gravar a baixa com o pagamento sugerido (ou "
+                                "com as DUAS guias, quando a sugestão for de par). "
                                 "Se você escolher algo na coluna Pagamento, aquela "
                                 "escolha manda e o Ligar é ignorado."),
         "Pagamento": st.column_config.SelectboxColumn(
@@ -785,56 +920,88 @@ with st.expander(f"🔎 Conferir título por título / conciliar (ligar pagament
                        if c in df_view.columns or v is None},
     )
 
-    def _escolhido(r) -> int | None:
-        """Pagamento que vai ser gravado nessa linha: o do dropdown vence; senão, o
-        sugerido quando o Ligar está marcado."""
-        sid = id_por_rotulo.get(r["Pagamento"])
+    MANTER = "manter"   # a célula mostra o conjunto de 2+ guias: não mexer nele
+
+    def _escolhido(r):
+        """O que vai ser gravado nessa linha. Devolve:
+             • lista de saídas  → é isso que o título passa a ter como baixa;
+             • MANTER           → a célula é o rótulo do conjunto já gravado (2+ guias);
+             • None             → nada escolhido (ou "— (não pago)").
+        Ordem: o dropdown vence; senão, o que o **Ligar** propõe (o par de guias tem
+        prioridade sobre o palpite 1-p/-1, porque a soma dele é exata)."""
+        rot = r["Pagamento"]
+        if rot in tid_do_rotulo_multi:
+            return MANTER if tid_do_rotulo_multi[rot] == r["_tid"] else None
+        sid = id_por_rotulo.get(rot)
         if sid:
-            return sid
+            return [sd_por_id[sid]]
         if r.get("Ligar"):
+            combo = combo_por_tid.get(r["_tid"])
+            if combo:
+                return list(combo["saidas"])
             inf = sug_por_tid.get(r["_tid"])
-            return inf["saida"]["id"] if inf else None
+            return [inf["saida"]] if inf else None
         return None
 
     # Feedback ao vivo: a coluna Status é calculada no load e SÓ muda depois de salvar.
     # Aqui conta quantos títulos já têm um pagamento escolhido mas ainda não gravado,
     # pra não parecer que "atrelar o pagamento não fez nada".
     prontos = sum(1 for _, r in editado.iterrows()
-                  if _escolhido(r) and "conferido" not in r["Status"])
+                  if isinstance(_escolhido(r), list) and "conferido" not in r["Status"])
     if prontos:
         st.info(f"🔗 **{prontos}** título(s) com pagamento escolhido, aguardando salvar. "
                 "A bolinha só vira 🟢 (e o título sai da lista dos 🔴) **depois** que você "
                 "clicar em salvar.")
 
     if st.button("💾 Salvar conciliação", type="primary"):
-        novos_vinc = {}   # tid -> saida_id (ou None)
+        novos_vinc = {}   # tid -> [saídas] | MANTER | None
         for _, r in editado.iterrows():
             novos_vinc[r["_tid"]] = _escolhido(r)
-        usados = [sid for sid in novos_vinc.values() if sid]
-        dups = {x for x in usados if usados.count(x) > 1}
+
+        # MESMO PAGAMENTO EM DOIS TÍTULOS (04/08/2026): antes era ERRO e barrava o
+        # salvamento inteiro. Agora é permitido — é a **guia junta** que quita dois
+        # títulos do CPR — mas vem escrito na tela, com a conta aberta, porque também
+        # é a cara de um engano.
+        usados = [s["id"] for v in novos_vinc.values() if isinstance(v, list) for s in v]
+        dups = sorted({x for x in usados if usados.count(x) > 1})
         if dups:
-            st.error("O mesmo pagamento está ligado a mais de um título "
-                     f"({len(dups)} caso(s)). Cada pagamento só pode quitar um título.")
-            st.stop()
+            _txt = []
+            for sid in dups:
+                _tids = [t for t, v in novos_vinc.items()
+                         if isinstance(v, list) and any(s["id"] == sid for s in v)]
+                _soma = sum(float(t["valor"]) for t in titulos_db if t["id"] in _tids)
+                _pg = sd_por_id[sid]["valor"]
+                _txt.append(f"pagamento #{sid} ({brl_md(_pg)}) → títulos "
+                            + ", ".join(f"nº {t}" for t in _tids)
+                            + f" = {brl_md(_soma)}"
+                            + ("  ✅ fecha" if abs(_soma - _pg) <= 0.01
+                               else f"  ⚠️ sobra/falta {brl_md(_pg - _soma)}"))
+            st.warning("⚠️ **Um pagamento quitando mais de um título** (guia junta): "
+                       + " · ".join(_txt))
+
         n_lig = n_desl = 0
-        atual = {t["id"]: t["lancamento_id"] for t in titulos_db}
-        for tid, sid in novos_vinc.items():
-            if sid == atual.get(tid):
+        for tid, esc in novos_vinc.items():
+            if esc is MANTER:
                 continue
-            # TRAVA (03/08/2026): só desfaz baixa se o pagamento atual estava mesmo na
-            # lista de opções — ou seja, se ele PODIA ter escolhido "— (não pago)" de
-            # propósito. Sem isso, qualquer título cuja saída não coubesse na lista
-            # (fora do período, fora do teto de opções) era desligado sozinho no Salvar.
-            if not sid and rotulo_por_id.get(atual.get(tid)) not in opcoes:
-                continue
-            if sid:
-                s = sd_por_id[sid]
-                execute("UPDATE titulos SET lancamento_id=?, status='pago', data_baixa=? "
-                        "WHERE id=?", (sid, s["data"], tid))
+            atuais = baixas_por_tid.get(tid, [])
+            if isinstance(esc, list):
+                if [s["id"] for s in esc] == atuais:
+                    continue                      # já é exatamente isso: não reescreve
+                baixas.ligar(tid, esc)
                 n_lig += 1
             else:
-                execute("UPDATE titulos SET lancamento_id=NULL, status='aberto', "
-                        "data_baixa=NULL WHERE id=?", (tid,))
+                if not atuais:
+                    continue
+                # TRAVA (03/08/2026): só desfaz baixa se o pagamento atual estava mesmo na
+                # lista de opções — ou seja, se ele PODIA ter escolhido "— (não pago)" de
+                # propósito. Sem isso, qualquer título cuja saída não coubesse na lista
+                # (fora do período, fora do teto de opções) era desligado sozinho no Salvar.
+                # (04/08: vale também pro conjunto de 2+ guias, cujo rótulo é o "🔗 …".)
+                _rot_atual = (_rotulo_multi(tid, [sd_por_id[l] for l in atuais if l in sd_por_id])
+                              if len(atuais) > 1 else rotulo_por_id.get(atuais[0]))
+                if _rot_atual not in opcoes:
+                    continue
+                baixas.desligar(tid)
                 n_desl += 1
         st.success(f"Conciliado! {n_lig} baixa(s) nova(s)"
                    + (f" · {n_desl} desfeita(s)" if n_desl else "") + ".")

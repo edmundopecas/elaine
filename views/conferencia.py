@@ -428,15 +428,40 @@ df["Δ (pago-prev)"] = pd.to_numeric(df["Δ (pago-prev)"], errors="coerce")
 saidas_reais = [s for s in saidas
                 if not any(k in _norm(s["plano"] or "") for k in _EXCLUIR_PAGO)]
 tot_pago = sum(s["valor"] for s in saidas_reais)
-tot_cpr = sum(t["valor"] for t in titulos_db)
+
+
+# ⚠️ O PREVISTO É O QUE VENCE NO PERÍODO (17/08/2026) — o Filipe viu na tela:
+# «esse valor do que está previsto no CPR ainda está errado». Estava mesmo: a
+# métrica somava os `titulos_db`, que vêm por vencimento ±7 dias (a margem que o
+# CASAMENTO precisa, porque se paga adiantado/atrasado alguns dias). Num período de
+# 01–14/08 isso somava 876 títulos vencendo de 25/07 a 21/08 = R$ 2.321.611,73
+# contra R$ 1.575.696,96 de saídas de 14 dias — 28 dias de previsto contra 14 de
+# pago, e a "Diferença" virava um número sem sentido (−R$ 745.914,77).
+# Agora o previsto conta SÓ o que vence dentro do período. A margem continua viva
+# onde ela serve: `titulos_db` (e o casamento) segue com os ±7 dias.
+def _vence_no_periodo(v) -> bool:
+    return bool(v) and d_ini.isoformat() <= str(v)[:10] <= d_fim.isoformat()
+
+
+_venc_per = [t for t in titulos_db if _vence_no_periodo(t["vencimento"])]
+n_venc_per = len(_venc_per)
+v_venc_per = float(sum(t["valor"] for t in _venc_per))
+tot_cpr = v_venc_per
 tot_dif = tot_pago - tot_cpr
 k = st.columns(3)
 k[0].metric("💸 Total de saídas (fora aplicações)", brl(tot_pago), f"{len(saidas_reais)} saídas")
-k[1].metric("📋 Está no CPR (previsto)", brl(tot_cpr), f"{len(titulos_db)} títulos")
+k[1].metric("📋 Previsto no CPR (vence no período)", brl(tot_cpr),
+            f"{n_venc_per} títulos",
+            help=f"Títulos do Contas a Pagar com vencimento entre "
+                 f"{d_ini.strftime('%d/%m')} e {d_fim.strftime('%d/%m')} — pagos ou "
+                 f"não. Pra casar com o pagamento a tela ainda carrega 7 dias a mais "
+                 f"pra cada lado ({len(titulos_db)} títulos), mas esse excedente não "
+                 f"entra na conta.")
 k[2].metric("↔️ Diferença", brl(tot_dif), delta_color="off",
-            help="Total pago − o que está no CPR. Positivo = paguei mais do que está no "
-                 "CPR (tem coisa fora do CPR pra lançar). Negativo = o CPR previa mais "
-                 "(parte não paga, ou já lançada como dinheiro).")
+            help="Total pago − o previsto que vence no período. Positivo = paguei mais "
+                 "do que vencia (título de outro vencimento, ou coisa fora do CPR). "
+                 "Negativo = vencia mais do que saiu (parte não paga, ou paga em "
+                 "dinheiro/conta não importada).")
 
 # ─── TODAS AS SAÍDAS (fora aplicações), com flag "está no CPR?" ──────────────
 # Mostra TODA saída (menos aplicação/transferência interna) e marca "No CPR?".
@@ -530,14 +555,184 @@ saidas_df.insert(len(_col_ordem), "Fila",
                   for ok, nat in zip(saidas_df["_ok"], saidas_df["_natureza"])])
 saidas_df = saidas_df.drop(columns=["_ok", "_natureza"])
 
+# ─── O OUTRO LADO: o que está no CPR e NÃO foi pago (17/08/2026) ─────────────
+# Pedido do Filipe: "na visão da conciliação só vemos o referente o que foi pago, mas
+# preciso que a planilha gere tbm o que tá no CPR e não está pago nas contas". Até
+# aqui a tela inteira (e as 3 abas do Excel) olhavam do lado do EXTRATO — toda saída
+# com a flag "No CPR?". O lado do PREVISTO só existia como linha 🔴 lá dentro do
+# expander de conciliação, e não ia pro Excel. Agora é lista própria: métricas na
+# tela + aba "CPR sem pagamento" na planilha.
+#
+# ⚠️ AS DUAS REGRAS DA LISTA (17/08/2026, reclamação do Filipe: "não faz sentido eu
+# tá puxando um período e vim de outros períodos") — a 1ª versão desta seção herdava
+# as janelas do resto da tela e mentia feio:
+#   1) SÓ ENTRA TÍTULO QUE VENCE DENTRO DO PERÍODO. O resto da tela busca título por
+#      vencimento ±7 dias (margem que o CASAMENTO precisa: paga-se adiantado/atrasado
+#      alguns dias). Só que isso jogava aqui, num período de 4 dias, título vencido
+#      em 06/08 — cujo pagamento nem estava carregado. MEDIDO em 13–17/08: 254
+#      títulos "sem pagamento" viravam 17 com esta regra.
+#   2) O PAGAMENTO É PROCURADO EM TODA A BASE, não só no período. "Não foi pago" é
+#      uma afirmação sobre a empresa inteira, não sobre a janela aberta na tela:
+#      saída de valor IDÊNTICO ao centavo, até 30 dias do vencimento, ainda sem
+#      baixa e não usada por outro título aqui. MEDIDO: dos 17 acima, 6 tinham
+#      pagamento na base → sobra REAL de 11 títulos (R$ 122.289,50). No mês inteiro
+#      (01–17/08): de 144 para 67.
+# O que a regra 2 acha vira AVISO na linha (com data e o quanto o nome bate) — nada
+# é ligado sozinho, a conciliação continua sendo na mão lá embaixo. Valor exato de
+# propósito: com valor aproximado a coluna viraria lixo, igual no `sugerir`.
+_hoje = date.today()
+
+_no_periodo = [t for t in res["titulos"]
+               if t["_status"] == "sem_saida" and _vence_no_periodo(t["vencimento"])]
+_vencs_sem = [t["vencimento"] for t in _no_periodo]
+fora_por_tid: dict[int, dict] = {}
+if _vencs_sem:
+    _ji = (pd.to_datetime(min(_vencs_sem)) - pd.Timedelta(days=30)).date().isoformat()
+    _jf = (pd.to_datetime(max(_vencs_sem)) + pd.Timedelta(days=30)).date().isoformat()
+    _cond = ["l.tipo='saida'", "l.data BETWEEN ? AND ?"]
+    _par = [_ji, _jf]
+    if sel_emp != "Todas":
+        _cond.append("l.empresa_id=?"); _par.append(emp_por_apelido[sel_emp])
+    _por_valor: dict[float, list[dict]] = {}
+    for _s in query(f"""SELECT l.id, l.data, l.valor, l.contraparte, l.descricao
+                        FROM lancamentos l WHERE {' AND '.join(_cond)}""", tuple(_par)):
+        # fora: o que já quitou algum título (baixa gravada) e o que o `casar` já
+        # entregou a OUTRO título nesta tela — senão o mesmo pagamento seria
+        # oferecido duas vezes.
+        if _s["id"] in titulos_da_saida or _s["id"] in usadas_casar:
+            continue
+        _por_valor.setdefault(round(float(_s["valor"]), 2), []).append(_s)
+    for t in _no_periodo:
+        melhor = None
+        for _s in _por_valor.get(round(float(t["valor"]), 2), []):
+            _sim = similaridade(t["fornecedor"], _s["contraparte"] or _s["descricao"] or "")
+            # desempate pela DISTÂNCIA ao vencimento: quando o nome não ajuda (o banco
+            # escreve a securitizadora e o Argos o fornecedor — ENERGEX × O.S.
+            # SECURITIZADORA, DIST. ALAGOANA DE BATERIAS × MOURA MACEIO), o que
+            # sobra pra escolher entre dois pagamentos do mesmo valor é a data.
+            _d = abs((pd.to_datetime(_s["data"]) - pd.to_datetime(t["vencimento"])).days)
+            if _d > 30:
+                continue
+            if melhor is None or (_sim, -_d) > (melhor[1], -melhor[2]):
+                melhor = (_s, _sim, _d)
+        if melhor:
+            fora_por_tid[t["_tid"]] = {"saida": melhor[0], "sim": melhor[1],
+                                       "dias": melhor[2]}
+
+
+def _texto_fora(inf: dict) -> str:
+    """«12/08 · MG VIDROS · mesmo valor · nome 91% · #12984» — o aviso de que existe
+    na base um pagamento de valor idêntico, ainda não conciliado."""
+    s = inf["saida"]
+    d = pd.to_datetime(s["data"]).strftime("%d/%m")
+    nome = (s["contraparte"] or s["descricao"] or "—")[:30]
+    return f"{d} · {nome} · mesmo valor · nome {inf['sim']:.0%} · #{s['id']}"
+
+
+linhas_naopago = []
+for t in _no_periodo:
+    inf = sug_por_tid.get(t["_tid"])
+    combo = combo_por_tid.get(t["_tid"])
+    fora = fora_por_tid.get(t["_tid"])
+    venc = pd.to_datetime(t["vencimento"]) if t["vencimento"] else None
+    linhas_naopago.append({
+        "_tem_sug": bool(combo or inf),
+        "_tem_fora": bool(fora),
+        "Vencimento": venc.strftime("%d/%m/%Y") if venc is not None else "—",
+        # positivo = vencido há N dias; negativo = ainda vai vencer.
+        "Atraso (dias)": (_hoje - venc.date()).days if venc is not None else None,
+        "Fornecedor": t["fornecedor"],
+        "Tipo": t["tipo_docto"],
+        "Documento": t["documento"],
+        "Loja": t["loja"],
+        "Empresa": t["empresa"],
+        "Previsto": t["valor"],
+        "💡 Sugestão do sistema": (_texto_combo(combo) if combo else
+                                   (_texto_sug(inf) if inf else SEM_SUG)),
+        "⚠️ Tem pagamento igual na base": _texto_fora(fora) if fora else SEM_SUG,
+    })
+
+# `columns=` explícito: sem título nenhum na fila o DataFrame vazio ainda precisa
+# ter as colunas, senão a aba do Excel sai em branco e o `drop` abaixo estoura.
+naopago_df = pd.DataFrame(linhas_naopago, columns=[
+    "_tem_sug", "_tem_fora", "Vencimento", "Atraso (dias)", "Fornecedor", "Tipo",
+    "Documento", "Loja", "Empresa", "Previsto", "💡 Sugestão do sistema",
+    "⚠️ Tem pagamento igual na base"])
+# 🔴 (o trabalho real) primeiro, ⚠️ (já tem pagamento, falta conciliar) depois —
+# dentro de cada fila, do maior valor pro menor.
+naopago_df = naopago_df.sort_values(["_tem_fora", "Previsto"], ascending=[True, False])
+n_np = len(naopago_df)
+v_np = float(naopago_df["Previsto"].sum()) if n_np else 0.0
+n_sug = int(naopago_df["_tem_sug"].sum()) if n_np else 0
+v_sug = float(naopago_df.loc[naopago_df["_tem_sug"], "Previsto"].sum()) if n_np else 0.0
+n_fp = int(naopago_df["_tem_fora"].sum()) if n_np else 0
+v_fp = float(naopago_df.loc[naopago_df["_tem_fora"], "Previsto"].sum()) if n_np else 0.0
+naopago_df.insert(0, "Fila", ["⚠️ tem pagamento igual · conciliar" if f
+                              else "🔴 sem pagamento" for f in naopago_df["_tem_fora"]])
+naopago_df = naopago_df.drop(columns=["_tem_sug", "_tem_fora"])
+# título sem loja/empresa (é o caso dos da "BRAGA PEÇAS E SERVIÇOS", que não tem
+# empresa no app) escrevia a palavra "None" na célula — vazio é vazio.
+for _c in ("Tipo", "Documento", "Loja", "Empresa"):
+    naopago_df[_c] = naopago_df[_c].fillna("—")
+
+st.divider()
+st.subheader(f"📋 Vence de {d_ini.strftime('%d/%m')} a {d_fim.strftime('%d/%m')} e NÃO "
+             f"foi pago")
+mn = st.columns(4)
+mn[0].metric("🔴 Sem pagamento", brl(v_np - v_fp), f"{n_np - n_fp} títulos",
+             delta_color="off",
+             help="Nenhum pagamento em lugar nenhum da base. É a lista de verdade.")
+mn[1].metric("⚠️ Tem pagamento igual na base", brl(v_fp), f"{n_fp} títulos",
+             delta_color="off",
+             help="Existe uma saída de valor IDÊNTICO, até 30 dias do vencimento, "
+                  "ainda sem baixa — não importa em que período ela caiu. "
+                  "Provavelmente já foi pago e falta só conciliar.")
+mn[2].metric("💡 Com palpite do sistema", brl(v_sug), f"{n_sug} títulos",
+             delta_color="off",
+             help="O sistema achou um pagamento parecido DENTRO do período (valor "
+                  "próximo + nome, ou duas guias que somam exato). Ligue lá embaixo, "
+                  "na conciliação.")
+mn[3].metric("✅ Com pagamento", brl(v_venc_per - v_np), f"{n_venc_per - n_np} títulos",
+             delta_color="off",
+             help=f"Dos {n_venc_per} títulos que vencem no período, os que já casaram "
+                  f"com um pagamento ou têm baixa gravada.")
+st.caption(f"O contrário da lista de cima. Aqui entra **só título que vence entre "
+           f"{d_ini.strftime('%d/%m')} e {d_fim.strftime('%d/%m')}** — nada de outro "
+           "período — e o pagamento é procurado na **base inteira**, não só no período "
+           "aberto: se o dinheiro saiu, ele acha, mesmo que a saída seja de outro dia. "
+           "Quem sobra 🔴 é o que realmente não foi pago: ou ainda não pagaram, ou saiu "
+           "por uma conta que não importamos, ou foi pago em dinheiro.")
+if n_np:
+    st.dataframe(naopago_df.assign(Previsto=naopago_df["Previsto"].map(brl)),
+                 hide_index=True, use_container_width=True,
+                 column_config={
+                     "Previsto": st.column_config.TextColumn(width="small",
+                                                             alignment="right"),
+                     "Atraso (dias)": st.column_config.NumberColumn(width="small"),
+                     "Fornecedor": st.column_config.TextColumn(width="large"),
+                     "💡 Sugestão do sistema": st.column_config.TextColumn(width="large"),
+                     "⚠️ Tem pagamento igual na base": st.column_config.TextColumn(
+                         width="large")})
+else:
+    st.success("Todo título do CPR neste período tem pagamento. 🎉")
+
 
 def _excel_conc() -> bytes:
     resumo = pd.DataFrame({
         "Indicador": ["Período", "Empresa", "Total de saídas (fora aplicações)",
-                      "Está no CPR (previsto)", "Diferença", "Saídas fora do CPR",
-                      "  ↳ fora: conferir", "  ↳ fora: por natureza (não passa no Argos)"],
+                      "Previsto no CPR (vence no período)", "Diferença",
+                      "Saídas fora do CPR",
+                      "  ↳ fora: conferir", "  ↳ fora: por natureza (não passa no Argos)",
+                      "  ↳ vencem no período e não foram pagos",
+                      "  ↳ destes, SEM pagamento em lugar nenhum",
+                      "  ↳ destes, com pagamento igual na base (falta conciliar)",
+                      "  ↳ destes, com palpite do sistema"],
         "Valor": [f"{d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}",
-                  sel_emp, tot_pago, tot_cpr, tot_dif, v_fora, v_conf, v_nat]})
+                  sel_emp, tot_pago, tot_cpr, tot_dif, v_fora, v_conf, v_nat,
+                  v_np, v_np - v_fp, v_fp, v_sug],
+        "Qtde": ["", "", len(saidas_reais), n_venc_per, "", n_fora,
+                 len(conferir_df), len(natureza_df), n_np,
+                 n_np - n_fp, n_fp, n_sug]})
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xl:
         resumo.to_excel(xl, sheet_name="Resumo", index=False)
@@ -545,6 +740,8 @@ def _excel_conc() -> bytes:
         conferir_df.to_excel(xl, sheet_name="Conferir", index=False)
         # a aba de sempre continua com TUDO, agora com a coluna Fila
         saidas_df.to_excel(xl, sheet_name="Saídas (No CPR)", index=False)
+        # 17/08/2026 — o lado do PREVISTO: título no CPR sem pagamento nenhum
+        naopago_df.to_excel(xl, sheet_name="CPR sem pagamento", index=False)
     return buf.getvalue()
 
 

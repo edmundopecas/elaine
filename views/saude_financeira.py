@@ -325,23 +325,57 @@ with t1:
 # 2. VENDA × COMPRA
 # ═════════════════════════════════════════════════════════════════════════════
 with t2:
-    st.subheader("A tesoura: o que entra de venda contra o que sai de compra")
-    linhas = [{"Mês": rotulo(m), "Receita": D[m]["receita"], "Compras (custo)": D[m]["custos"],
-               "Compra ÷ venda": D[m]["custo_pct"],
+    st.subheader("A tesoura: o que entra de venda contra o que sai para mercadoria")
+    st.caption("⚠️ A coluna de compra é **caixa**: o que efetivamente saiu do banco na janela. "
+               "Compra a prazo entra no dia em que o boleto foi pago, não no dia da nota — "
+               "então o que pressiona o caixa deste mês foi comprado 30 a 60 dias atrás.")
+    linhas = [{"Mês": rotulo(m), "Receita": D[m]["receita"], "Pago de mercadoria": D[m]["custos"],
+               "Pagamento ÷ venda": D[m]["custo_pct"],
                "Sobra bruta": D[m]["receita"] - D[m]["custos"]} for m in MESES]
+    # O previsto: títulos de MERCADORIA do Argos vencendo na mesma janela. Sem ele
+    # não dá para saber se o mês pagou mais porque comprou mais ou porque venceu mais.
+    def venc_mercadoria(m: str) -> float:
+        sql = ("SELECT COALESCE(SUM(t.valor),0) v FROM titulos t "
+               "WHERE LOWER(COALESCE(t.tipo_docto,'')) LIKE '%mercadoria%' "
+               "AND substr(t.vencimento,1,7)=? "
+               "AND CAST(substr(t.vencimento,9,2) AS INTEGER)<=?")
+        par = [m, dia_corte]
+        if emp_par:
+            sql += " AND t.empresa_id=?"
+            par += emp_par
+        return float(query(sql, tuple(par))[0]["v"])
+
+    tem_titulo = False
+    for i, m in enumerate(MESES):
+        v = venc_mercadoria(m)
+        linhas[i]["Venceu no Argos"] = v
+        linhas[i]["% do que venceu"] = (D[m]["custos"] / v * 100) if v else 0
+        tem_titulo = tem_titulo or v > 0
+
     df = pd.DataFrame(linhas)
-    show = df.copy()
-    for col in ("Receita", "Compras (custo)", "Sobra bruta"):
+    cols = ["Mês", "Receita", "Pago de mercadoria", "Pagamento ÷ venda", "Sobra bruta"]
+    if tem_titulo:
+        cols = ["Mês", "Receita", "Venceu no Argos", "Pago de mercadoria",
+                "% do que venceu", "Pagamento ÷ venda", "Sobra bruta"]
+    show = df[cols].copy()
+    for col in ("Receita", "Pago de mercadoria", "Sobra bruta"):
         show[col] = show[col].map(brl)
-    show["Compra ÷ venda"] = show["Compra ÷ venda"].map(pct)
+    show["Pagamento ÷ venda"] = show["Pagamento ÷ venda"].map(pct)
+    if tem_titulo:
+        # Mês sem "A Pagar Geral" importada não é mês que venceu zero: mostra travessão,
+        # senão a linha vira "0,0% do que venceu" e parece calote.
+        show["Venceu no Argos"] = df["Venceu no Argos"].map(
+            lambda v: brl(v) if v else "— (sem A Pagar importada)")
+        show["% do que venceu"] = [pct(p) if v else "—"
+                                   for p, v in zip(df["% do que venceu"], df["Venceu no Argos"])]
     st.dataframe(show, use_container_width=True, hide_index=True)
 
     graf = pd.DataFrame([{"Mês": rotulo(m), "Tipo": "Receita", "Valor": D[m]["receita"]} for m in MESES]
-                        + [{"Mês": rotulo(m), "Tipo": "Compras", "Valor": D[m]["custos"]} for m in MESES])
+                        + [{"Mês": rotulo(m), "Tipo": "Mercadoria", "Valor": D[m]["custos"]} for m in MESES])
     ch = (alt.Chart(graf).mark_bar()
           .encode(x=alt.X("Tipo:N", title=None, axis=None),
                   y=alt.Y("Valor:Q", title="R$ na janela"),
-                  color=alt.Color("Tipo:N", scale=alt.Scale(domain=["Receita", "Compras"],
+                  color=alt.Color("Tipo:N", scale=alt.Scale(domain=["Receita", "Mercadoria"],
                                                             range=[VERDE, VERMELHO])),
                   column=alt.Column("Mês:N", sort=[rotulo(m) for m in reversed(MESES)], title=None),
                   tooltip=["Mês", "Tipo", alt.Tooltip("Valor:Q", format=",.2f")])
@@ -351,14 +385,32 @@ with t2:
     if ant:
         custo_no_ritmo = ref["receita"] * ant["custo_pct"] / 100
         excesso = ref["custos"] - custo_no_ritmo
+        venc_ref, venc_ant = df.iloc[0].get("Venceu no Argos", 0), df.iloc[1].get("Venceu no Argos", 0)
         if excesso > 0:
-            st.error(f"**Comprando no mesmo ritmo de {rot_ant}** ({pct(ant['custo_pct'])} da venda), "
-                     f"a compra da janela teria sido {brl(custo_no_ritmo)} em vez de {brl(ref['custos'])}. "
-                     f"São **{brl(excesso)} a mais nesta janela** — cerca de "
-                     f"{brl(excesso / dia_corte * 30)} no mês inteiro — parados em estoque e "
-                     f"financiados por banco.")
+            msg = (f"**Saiu {brl(excesso)} a mais do que sairia no ritmo de {rot_ant}** "
+                   f"({pct(ant['custo_pct'])} da venda seriam {brl(custo_no_ritmo)}, e saíram "
+                   f"{brl(ref['custos'])}) — cerca de {brl(excesso / dia_corte * 30)} no mês inteiro. ")
+            if tem_titulo and venc_ant:
+                dif_venc = (venc_ref - venc_ant) / venc_ant * 100
+                if dif_venc > 5:
+                    msg += (f"**Mas não é descontrole de pagamento:** venceu {num(dif_venc)}% mais "
+                            f"de mercadoria no Argos ({brl(venc_ref)} contra {brl(venc_ant)}) e você "
+                            f"pagou praticamente a mesma proporção do que venceu "
+                            f"({pct(df.iloc[0]['% do que venceu'])} contra "
+                            f"{pct(df.iloc[1]['% do que venceu'])}). O aperto veio da **compra feita "
+                            f"30 a 60 dias atrás**, que está vencendo agora com a venda menor. "
+                            f"Cortar compra hoje só alivia o caixa daqui a um a dois meses — por isso "
+                            f"a decisão é urgente mesmo sem efeito imediato.")
+                else:
+                    msg += ("O que venceu no Argos ficou praticamente igual ao mês anterior, "
+                            "então a diferença é de pagamento, não de vencimento.")
+            else:
+                msg += ("Sem os títulos do Argos importados nesta janela não dá para saber se "
+                        "venceu mais ou se pagou mais — importe a *A Pagar Geral* do período "
+                        "para separar as duas coisas.")
+            st.error(msg)
         else:
-            st.success(f"A compra está proporcionalmente **abaixo** de {rot_ant}: "
+            st.success(f"O pagamento de mercadoria está proporcionalmente **abaixo** de {rot_ant}: "
                        f"{brl(-excesso)} a menos na janela.")
 
     st.markdown("##### 🏭 Maiores compras da janela")
@@ -379,14 +431,18 @@ with t2:
 
     with st.expander("🔍 Ver detalhes do cálculo"):
         st.markdown("""
-- **Compras (custo):** saídas do grupo *Custos* — CMV, material/insumo, frete sobre
-  compras, carcaças e custo de serviço prestado. É o dinheiro que saiu do banco na
-  janela, não a nota fiscal emitida: compra a prazo aparece no dia do pagamento.
-- **Compra ÷ venda:** custo da janela dividido pela receita da mesma janela. Subir esse
-  percentual com a venda caindo significa estoque crescendo com dinheiro de terceiros.
-- **"Comprando no mesmo ritmo":** aplica o percentual do mês anterior sobre a receita
-  deste mês. A projeção para o mês inteiro é uma regra de três sobre os dias corridos
-  da janela — serve de ordem de grandeza, não de fechamento.
+- **Pago de mercadoria:** saídas do grupo *Custos* — CMV, material/insumo, frete sobre
+  compras, carcaças e custo de serviço prestado. É **regime de caixa**: o dinheiro que
+  saiu do banco na janela, não a nota fiscal emitida. Compra a prazo aparece no dia do
+  pagamento, então este número reflete decisão de compra de 30 a 60 dias atrás.
+- **Venceu no Argos:** títulos com tipo *MERCADORIA* cujo vencimento cai na mesma janela.
+  É o previsto contra o realizado — é ele que separa "pagou mais" de "comprou mais".
+  Só aparece se a *A Pagar Geral* do período já tiver sido importada.
+- **% do que venceu:** pago ÷ vencido. Estável entre meses = pagamento sob controle,
+  o que mudou foi o volume que venceu.
+- **Pagamento ÷ venda:** quanto da venda da janela foi embora em mercadoria.
+- A projeção para o mês inteiro é regra de três sobre os dias corridos da janela —
+  ordem de grandeza, não fechamento.
 """)
 
 # ═════════════════════════════════════════════════════════════════════════════

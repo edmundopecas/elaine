@@ -19,12 +19,13 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 
 import altair as alt
 import pandas as pd
 import streamlit as st
 
+from conferencia import casar, sugerir
 from db import query, execute
 from tema import POSITIVO as VERDE, NEGATIVO as VERMELHO, ATENCAO as AZUL, NEUTRO as CINZA
 
@@ -412,6 +413,140 @@ with t2:
         else:
             st.success(f"O pagamento de mercadoria está proporcionalmente **abaixo** de {rot_ant}: "
                        f"{brl(-excesso)} a menos na janela.")
+
+    # ── Detalhe: o que venceu contra o que saiu, título a título ─────────────
+    st.markdown("##### 🔎 A diferença entre o que venceu e o que saiu")
+    if not tem_titulo:
+        st.info("Para abrir a diferença item a item é preciso ter a **A Pagar Geral** do "
+                "período importada (tela 🔗 Conferência). Sem ela só dá para ver o caixa.")
+    else:
+        st.caption("Cada título de mercadoria que venceu na janela, casado com o pagamento "
+                   "que saiu do banco — mesmo motor da tela 🔗 Conferência (valor ao centavo "
+                   "+ nome/categoria), porque o extrato abrevia o nome do fornecedor "
+                   "(*CIA BRA DE DIS AUTO SA* × *COMPANHIA BRASILEIRA DE DISTRIBUIÇÃO*).")
+        if st.checkbox("Abrir o detalhe item a item", value=True, key="det_merc"):
+            par_t = [f"{mes}-01", f"{mes}-{dia_corte:02d}"]
+            sql_t = ("SELECT t.id,t.contraparte,t.valor,t.vencimento,t.documento,t.tipo_docto,"
+                     "t.loja, e.apelido empresa FROM titulos t "
+                     "LEFT JOIN empresas e ON e.id=t.empresa_id "
+                     "WHERE LOWER(COALESCE(t.tipo_docto,'')) LIKE '%mercadoria%' "
+                     "AND t.vencimento BETWEEN ? AND ?")
+            if emp_par:
+                sql_t += " AND t.empresa_id=?"
+                par_t += emp_par
+            tit_db = query(sql_t, tuple(par_t))
+
+            # O pagamento pode sair antes ou depois do vencimento: procura do 1º dia
+            # do mês anterior até o fim do mês de referência.
+            ini_pg = f"{mes_menos(mes, 1)}-01"
+            sql_s = ("SELECT l.id,l.data,l.valor,l.contraparte,l.descricao,"
+                     "e.apelido AS empresa_apelido, COALESCE(p.nome,'—') AS plano "
+                     "FROM lancamentos l LEFT JOIN empresas e ON e.id=l.empresa_id "
+                     "LEFT JOIN plano_contas p ON p.id=l.plano_conta_id "
+                     "WHERE l.tipo='saida' AND p.grupo='Custos' AND l.data BETWEEN ? AND ?"
+                     + emp_sql)
+            sai_db = query(sql_s, tuple([ini_pg, f"{mes}-31"] + emp_par))
+
+            abertos = [{"_tid": t["id"], "fornecedor": t["contraparte"] or "",
+                        "valor": t["valor"], "vencimento": t["vencimento"],
+                        "documento": t["documento"], "tipo_docto": t["tipo_docto"],
+                        "loja": t["loja"], "empresa": t["empresa"]} for t in tit_db]
+            res = casar(abertos, sai_db)
+            com_pgto = [t for t in res["titulos"] if t["_status"] != "sem_saida"]
+            sem_pgto = [t for t in res["titulos"] if t["_status"] == "sem_saida"]
+            v_venceu = sum(t["valor"] for t in res["titulos"])
+            v_com = sum(t["valor"] for t in com_pgto)
+            v_sem = sum(t["valor"] for t in sem_pgto)
+
+            usadas = {t["_saida"]["id"] for t in res["titulos"] if t["_saida"]}
+            # O palpite só olha pagamento PERTO do vencimento (20 dias antes do 1º
+            # ao fim do mês). Sem esse corte ele oferece um pagamento de julho para
+            # um título que venceu em agosto, e palpite frouxo polui tanto quanto
+            # palpite nenhum.
+            lim_ini = (date(int(mes[:4]), int(mes[5:7]), 1) - timedelta(days=20)).isoformat()
+            disp = [x for x in sai_db if x["id"] not in usadas and x["data"] >= lim_ini]
+            sug = sugerir(sem_pgto, disp)
+
+            d1, d2, d3 = st.columns(3)
+            d1.metric("📄 Venceu na janela", brl(v_venceu), f"{len(res['titulos'])} títulos",
+                      delta_color="off")
+            d2.metric("✅ Com pagamento identificado", brl(v_com), f"{len(com_pgto)} títulos",
+                      delta_color="off")
+            d3.metric("❓ Sem pagamento identificado", brl(v_sem), f"{len(sem_pgto)} títulos",
+                      delta_color="off")
+
+            st.warning("**Sem pagamento identificado ≠ fornecedor não pago.** O título pode ter "
+                       "sido baixado no Argos por devolução, bonificação ou acerto comercial; "
+                       "pago por valor diferente do título (juros, desconto, agrupamento de "
+                       "notas); pago por outra empresa do grupo; ou o pagamento estar numa "
+                       "conta que ainda não exportou. Esta lista é **o que conferir**, não uma "
+                       "lista de dívida.")
+
+            linhas_sem = []
+            if sem_pgto:
+                for i, t in enumerate(sem_pgto):
+                    pp = sug.get(i)
+                    linhas_sem.append({
+                        "Vencimento": t["vencimento"], "Fornecedor": t["fornecedor"],
+                        "Documento": t["documento"], "Loja": t["loja"],
+                        "Valor do título": t["valor"],
+                        "Palpite de pagamento": "" if not pp else
+                        f"{(pp['saida']['contraparte'] or pp['saida']['descricao'])[:26]} "
+                        f"{brl(pp['saida']['valor'])} em {pp['saida']['data'][8:10]}/"
+                        f"{pp['saida']['data'][5:7]}",
+                        "Por que o palpite": "" if not pp else
+                        ("valor idêntico" if abs(pp["dif"]) <= 0.01
+                         else f"dif {brl(pp['dif'])}")
+                        + f" · nome {pct(pp['sim'] * 100)}"
+                        + (" · praticamente certo" if pp.get("forte") else "")})
+                df_sem = pd.DataFrame(linhas_sem).sort_values("Valor do título", ascending=False)
+                show_sem = df_sem.copy()
+                show_sem["Valor do título"] = show_sem["Valor do título"].map(brl)
+                st.dataframe(show_sem, use_container_width=True, hide_index=True)
+                st.caption(f"{len(sug)} dos {len(sem_pgto)} têm um palpite de pagamento "
+                           "(valor próximo + nome). Ligar de verdade é na tela 🔗 Conferência — "
+                           "aqui é só leitura, nada é baixado.")
+
+            sobra_pg = res["saidas_sem_titulo"]
+            v_sobra = sum(x["valor"] for x in sobra_pg)
+            if sobra_pg:
+                with st.expander(f"💸 Pagamentos de mercadoria sem título correspondente — "
+                                 f"{len(sobra_pg)} · {brl(v_sobra)}"):
+                    st.caption("Saiu do banco como mercadoria mas nenhum título vencendo na "
+                               "janela bate. Costuma ser título de outro vencimento, compra à "
+                               "vista sem passar pelo CPR, ou pagamento adiantado.")
+                    df_sobra = pd.DataFrame([
+                        {"Data": x["data"], "Fornecedor": x["contraparte"] or x["descricao"],
+                         "Empresa": x["empresa_apelido"], "Valor": x["valor"]}
+                        for x in sorted(sobra_pg, key=lambda z: -z["valor"])[:60]])
+                    df_sobra["Valor"] = df_sobra["Valor"].map(brl)
+                    st.dataframe(df_sobra, use_container_width=True, hide_index=True)
+
+            import io
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as w:
+                (pd.DataFrame(linhas_sem) if linhas_sem else
+                 pd.DataFrame(columns=["Vencimento"])).to_excel(
+                    w, index=False, sheet_name="Sem pagamento")
+                (pd.DataFrame([
+                    {"Vencimento": t["vencimento"], "Fornecedor": t["fornecedor"],
+                     "Documento": t["documento"], "Valor do titulo": t["valor"],
+                     "Pago": t["_saida"]["valor"], "Data do pagamento": t["_saida"]["data"],
+                     "Diferenca": t["_diferenca"],
+                     "Casou por": "nome" if t["_status"] == "casado" else "categoria"}
+                    for t in com_pgto]) if com_pgto else
+                 pd.DataFrame(columns=["Vencimento"])).to_excel(
+                    w, index=False, sheet_name="Com pagamento")
+                (pd.DataFrame([
+                    {"Data": x["data"], "Fornecedor": x["contraparte"] or x["descricao"],
+                     "Empresa": x["empresa_apelido"], "Valor": x["valor"]}
+                    for x in sobra_pg]) if sobra_pg else
+                 pd.DataFrame(columns=["Data"])).to_excel(
+                    w, index=False, sheet_name="Pagto sem titulo")
+            st.download_button(
+                "⬇️ Exportar a diferença em Excel", buf.getvalue(),
+                file_name=f"mercadoria_venceu_x_pagou_{mes}_ate_{dia_corte:02d}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     st.markdown("##### 🏭 Maiores compras da janela")
     top = query(

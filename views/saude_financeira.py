@@ -401,10 +401,7 @@ with t2:
                             f"{pct(df.iloc[1]['% do que venceu'])}). O aperto veio da **compra feita "
                             f"30 a 60 dias atrás**, que está vencendo agora com a venda menor. "
                             f"Cortar compra hoje só alivia o caixa daqui a um a dois meses — por isso "
-                            f"a decisão é urgente mesmo sem efeito imediato. "
-                            f"⚠️ Confira antes o bloco 🔁 abaixo: título reincluído (a mesma "
-                            f"nota lançada de novo) infla o quanto 'venceu' e derruba esta "
-                            f"comparação.")
+                            f"a decisão é urgente mesmo sem efeito imediato.")
                 else:
                     msg += ("O que venceu no Argos ficou praticamente igual ao mês anterior, "
                             "então a diferença é de pagamento, não de vencimento.")
@@ -509,67 +506,6 @@ with t2:
                 st.caption(f"{len(sug)} dos {len(sem_pgto)} têm um palpite de pagamento "
                            "(valor próximo + nome). Ligar de verdade é na tela 🔗 Conferência — "
                            "aqui é só leitura, nada é baixado.")
-
-            # ── Título reincluído: o mesmo documento com vencimento novo ──
-            # A mesma nota lançada outra vez no contas a pagar faz o "venceu"
-            # contar duas vezes e infla a comparação entre meses. Aqui a busca é
-            # só dentro do próprio CPR: fornecedor + documento iguais, vencimento
-            # anterior já existente. Nada de nota fiscal, nada de julgamento —
-            # a tela mostra o par e quem lê decide o que é.
-            sql_re = ("SELECT t.id, t.contraparte f, t.documento doc, t.valor, t.vencimento, "
-                      "(SELECT MIN(a.vencimento) FROM titulos a "
-                      "  WHERE UPPER(TRIM(a.contraparte))=UPPER(TRIM(t.contraparte)) "
-                      "    AND a.documento=t.documento AND a.vencimento < t.vencimento) venc_ant, "
-                      "(SELECT a.valor FROM titulos a "
-                      "  WHERE UPPER(TRIM(a.contraparte))=UPPER(TRIM(t.contraparte)) "
-                      "    AND a.documento=t.documento AND a.vencimento < t.vencimento "
-                      "  ORDER BY a.vencimento LIMIT 1) valor_ant "
-                      "FROM titulos t "
-                      "WHERE LOWER(COALESCE(t.tipo_docto,'')) LIKE '%mercadoria%' "
-                      "  AND COALESCE(t.documento,'') <> '' "
-                      "  AND t.vencimento BETWEEN ? AND ? "
-                      "  AND EXISTS (SELECT 1 FROM titulos a "
-                      "              WHERE UPPER(TRIM(a.contraparte))=UPPER(TRIM(t.contraparte)) "
-                      "                AND a.documento=t.documento "
-                      "                AND a.vencimento < t.vencimento)")
-            par_re = [f"{mes}-01", f"{mes}-{dia_corte:02d}"]
-            if emp_par:
-                sql_re += " AND t.empresa_id=?"
-                par_re += emp_par
-            reinc = query(sql_re + " ORDER BY t.valor DESC", tuple(par_re))
-            v_reinc = sum(float(r["valor"]) for r in reinc)
-
-            if reinc:
-                st.info(f"🔁 **{len(reinc)} títulos que venceram na janela já tinham aparecido "
-                        f"antes com o mesmo documento — {brl(v_reinc)}** "
-                        f"({pct(v_reinc / v_venceu * 100)} do que venceu). Descontando esses, "
-                        f"venceu **{brl(v_venceu - v_reinc)}**. É esse o número que vale para "
-                        f"comparar com o mês passado: a mesma nota lançada duas vezes conta "
-                        f"em dobro no total do mês.")
-                linhas_re = []
-                for r in reinc:
-                    try:
-                        d1 = date(*map(int, r["venc_ant"].split("-")))
-                        d2 = date(*map(int, r["vencimento"].split("-")))
-                        dias = f"+{(d2 - d1).days} dias"
-                    except Exception:
-                        dias = "—"
-                    va = float(r["valor_ant"] or 0)
-                    linhas_re.append({
-                        "Fornecedor": r["f"], "Documento": r["doc"],
-                        "Venceu antes em": r["venc_ant"], "Reapareceu vencendo em": r["vencimento"],
-                        "Intervalo": dias, "Valor agora": float(r["valor"]),
-                        "Valor antes": va,
-                        "Valor": "idêntico" if abs(float(r["valor"]) - va) < 0.01
-                                 else f"difere {brl(float(r['valor']) - va)}"})
-                df_re = pd.DataFrame(linhas_re)
-                show_re = df_re.copy()
-                for c in ("Valor agora", "Valor antes"):
-                    show_re[c] = show_re[c].map(brl)
-                st.dataframe(show_re, use_container_width=True, hide_index=True)
-                st.caption("Leitura sem julgamento: pode ser renegociação de vencimento com o "
-                           "fornecedor, parcela relançada ou duplicidade. A tela mostra o par — "
-                           "o par é o fato; o motivo é com quem lançou.")
 
             sobra_pg = res["saidas_sem_titulo"]
             v_sobra = sum(x["valor"] for x in sobra_pg)

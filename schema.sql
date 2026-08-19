@@ -159,3 +159,27 @@ CREATE TABLE IF NOT EXISTS titulo_baixas (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_titulo_baixas_par
     ON titulo_baixas(titulo_id, lancamento_id);
 CREATE INDEX IF NOT EXISTS idx_titulo_baixas_lanc ON titulo_baixas(lancamento_id);
+
+-- Contratos de empréstimo (18/08/2026) — ver comentário no schema_pg.sql.
+CREATE TABLE IF NOT EXISTS emprestimos_contratos (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    empresa_id        INTEGER REFERENCES empresas(id),
+    conta_bancaria_id INTEGER REFERENCES contas_bancarias(id),
+    banco             TEXT,
+    numero            TEXT,
+    apelido           TEXT,
+    valor_contratado  REAL,
+    data_contratacao  TEXT,
+    taxa_am           REAL,
+    prazo_meses       INTEGER,
+    carencia_meses    INTEGER DEFAULT 0,
+    parcela_carencia  REAL,
+    parcela_apos      REAL,
+    dia_debito        INTEGER,
+    saldo_devedor     REAL,
+    saldo_em          TEXT,
+    situacao          TEXT DEFAULT 'ativo',
+    observacao        TEXT,
+    criado_em         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_emp_contratos_emp ON emprestimos_contratos(empresa_id);

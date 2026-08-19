@@ -171,3 +171,34 @@ CREATE TABLE IF NOT EXISTS titulo_baixas (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_titulo_baixas_par
     ON titulo_baixas(titulo_id, lancamento_id);
 CREATE INDEX IF NOT EXISTS idx_titulo_baixas_lanc ON titulo_baixas(lancamento_id);
+
+-- CONTRATOS DE EMPRÉSTIMO (18/08/2026) ---------------------------------------
+-- Os bancos debitam a parcela direto na conta: não passa pelo Argos, então o
+-- CPR não tem o cronograma e a base só enxerga o que JÁ saiu. Sem o contrato
+-- não dá pra responder "quanto ainda devo" nem "quando a parcela sobe".
+-- O caso do grupo: contratos com CARÊNCIA — 6 meses pagando só juros e depois
+-- começa a amortizar. O extrato de hoje mostra a parcela pequena (juros) e
+-- esconde o degrau que vem. `carencia_meses` + `parcela_apos` é o que permite
+-- projetar esse degrau na tela Saúde Financeira.
+CREATE TABLE IF NOT EXISTS emprestimos_contratos (
+    id                SERIAL PRIMARY KEY,
+    empresa_id        INTEGER REFERENCES empresas(id),
+    conta_bancaria_id INTEGER REFERENCES contas_bancarias(id),
+    banco             TEXT,
+    numero            TEXT,               -- nº do contrato no banco
+    apelido           TEXT,               -- como o contrato é chamado no dia a dia
+    valor_contratado  DOUBLE PRECISION,
+    data_contratacao  TEXT,               -- YYYY-MM-DD
+    taxa_am           DOUBLE PRECISION,   -- % ao mês
+    prazo_meses       INTEGER,            -- nº de parcelas DE AMORTIZAÇÃO (fora a carência)
+    carencia_meses    INTEGER DEFAULT 0,  -- meses pagando só juros
+    parcela_carencia  DOUBLE PRECISION,   -- valor debitado durante a carência
+    parcela_apos      DOUBLE PRECISION,   -- valor debitado depois que amortiza (0/NULL = calcula)
+    dia_debito        INTEGER,            -- dia do mês em que o banco debita
+    saldo_devedor     DOUBLE PRECISION,   -- saldo informado pelo banco
+    saldo_em          TEXT,               -- data do saldo informado
+    situacao          TEXT DEFAULT 'ativo',   -- ativo | quitado
+    observacao        TEXT,
+    criado_em         TEXT NOT NULL DEFAULT (now()::text)
+);
+CREATE INDEX IF NOT EXISTS idx_emp_contratos_emp ON emprestimos_contratos(empresa_id);

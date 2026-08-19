@@ -17,6 +17,7 @@ init_db()
 importar = st.Page("views/importar.py", title="Importar Extrato", icon="📥")
 boletos = st.Page("views/boletos_dda.py", title="Detalhar Boletos DDA", icon="📄")
 diretoria = st.Page("views/diretoria.py", title="Visão da Diretoria", icon="📋")
+saude = st.Page("views/saude_financeira.py", title="Saúde Financeira", icon="💊")
 saidas = st.Page("views/saidas.py", title="Saídas", icon="💸", default=True)
 entradas = st.Page("views/entradas.py", title="Entradas", icon="💰")
 pendencias = st.Page("views/pendencias.py", title="Pendências", icon="⏳")
@@ -33,7 +34,7 @@ base = st.Page("views/base_tipos.py", title="Base de Tipos", icon="📒")
 # Menu em seções: a de cima é o destaque gerencial (Elaine começa por aqui);
 # a de baixo é o operacional do dia a dia. Saídas segue como página default.
 pg = st.navigation({
-    "⭐ Para a Diretoria": [diretoria, comparativo],
+    "⭐ Para a Diretoria": [diretoria, saude, comparativo],
     "Operação": [saidas, entradas, pendencias, importar, boletos, conferencia,
                  painel, painel_ent, analise_fat, emprestimos, transfer, contas, base],
 })

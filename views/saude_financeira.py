@@ -46,6 +46,12 @@ def var_pct(novo: float, velho: float):
     return None if not velho else (novo - velho) / velho * 100
 
 
+def num(v, casas: int = 1, sinal: bool = False) -> str:
+    """Número no padrão brasileiro (vírgula decimal), com sinal opcional."""
+    fmt = f"{{:+.{casas}f}}" if sinal else f"{{:.{casas}f}}"
+    return fmt.format(float(v or 0)).replace(".", ",")
+
+
 def dias_uteis(mes: str, ate_dia: int) -> int:
     """Dias de semana (seg–sex) do dia 1 até `ate_dia` do mês 'YYYY-MM'."""
     y, m = int(mes[:4]), int(mes[5:7])
@@ -157,13 +163,20 @@ F_DIVIDA = " AND l.tipo='saida' AND l.plano_conta_id=39"
 
 # Adquirentes: o recebimento de cartão não tem plano de contas próprio (cai como
 # Receita de Vendas), então é reconhecido pelo nome da bandeira no histórico.
+# "Liberação Vinculada" é o Safra liberando cartão ANTECIPADO (confirmado pelo
+# Filipe em 18/08) — não traz o nome da adquirente no histórico, então precisa
+# entrar na mão, senão o cartão e a antecipação saem subestimados.
 ADQUIRENTES = {"Cielo": "cielo", "SafraPay": "safrapay", "Getnet": "getnet",
-               "PagSeguro": "pagseguro", "Stone": "stone", "Rede": "redecard"}
+               "PagSeguro": "pagseguro", "Stone": "stone", "Rede": "redecard",
+               "Liberação Vinculada (Safra)": "liberacao vinculada"}
 F_CARTAO = (" AND l.tipo='entrada' AND ("
             + " OR ".join(f"LOWER(l.descricao) LIKE {ASPA}%{p}%{ASPA}"
                           for p in ADQUIRENTES.values()) + ")")
+# Antecipação = recebível adiantado. Duas formas no grupo: o histórico diz
+# "antecipação" (SafraPay na Filial) ou é a Liberação Vinculada (Matriz).
 F_ANTECIP = (" AND l.tipo='entrada' AND (LOWER(l.descricao) LIKE '%antecipacao%'"
-             " OR LOWER(l.descricao) LIKE '%antecipação%')")
+             " OR LOWER(l.descricao) LIKE '%antecipação%'"
+             " OR LOWER(l.descricao) LIKE '%liberacao vinculada%')")
 
 D = {m: {"receita": soma(m, F_RECEITA), "aluguel": soma(m, F_ALUGUEL),
          "custos": soma(m, F_CUSTOS), "pessoal": soma(m, F_PESSOAL),
@@ -180,21 +193,27 @@ for m in MESES:
     d["dia_util"] = d["receita"] / DU[m]
     d["cartao_du"] = d["cartao"] / DU[m]
     d["custo_pct"] = (d["custos"] / d["receita"] * 100) if d["receita"] else 0
+    d["antecip_pct"] = (d["antecip"] / d["receita"] * 100) if d["receita"] else 0
 
 ref = D[mes]
 ant = D[MESES[1]] if len(MESES) > 1 else None
 rot_ant = rotulo(MESES[1]) if len(MESES) > 1 else ""
 
 # ── Cabeçalho: os 4 números que importam ─────────────────────────────────────
-k1, k2, k3, k4 = st.columns(4)
+k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("💰 Receita por dia útil", brl(ref["dia_util"]),
-          None if not ant else f"{var_pct(ref['dia_util'], ant['dia_util']):+.1f}% vs {rot_ant}")
+          None if not ant else f"{num(var_pct(ref['dia_util'], ant['dia_util']), 1, True)}% vs {rot_ant}")
 k2.metric("💳 Cartão por dia útil", brl(ref["cartao_du"]),
-          None if not ant else f"{var_pct(ref['cartao_du'], ant['cartao_du']):+.1f}% vs {rot_ant}")
+          None if not ant else f"{num(var_pct(ref['cartao_du'], ant['cartao_du']), 1, True)}% vs {rot_ant}")
 k3.metric("📦 Compra sobre a venda", pct(ref["custo_pct"]),
-          None if not ant else f"{ref['custo_pct'] - ant['custo_pct']:+.1f} p.p. vs {rot_ant}",
+          None if not ant else f"{num(ref['custo_pct'] - ant['custo_pct'], 1, True)} p.p. vs {rot_ant}",
           delta_color="inverse")
-k4.metric("💧 Sobrou depois de tudo", brl(ref["sobra"]),
+k4.metric("⏩ Receita que veio antecipada", pct(ref["antecip_pct"]),
+          None if not ant else f"{num(ref['antecip_pct'] - ant['antecip_pct'], 1, True)} p.p. vs {rot_ant}",
+          delta_color="inverse",
+          help="Quanto da receita da janela é recebível adiantado — venda de ontem "
+               "puxada para hoje. Subir esse número é consumir o mês seguinte.")
+k5.metric("💧 Sobrou depois de tudo", brl(ref["sobra"]),
           None if not ant else f"{brl(ref['sobra'] - ant['sobra'])} vs {rot_ant}")
 
 st.divider()
@@ -240,7 +259,7 @@ with t1:
         if cai_total < 0:
             parcela = (cai_cartao / cai_total * 100) if cai_total else 0
             cabeca = (f"**Caiu {brl(-cai_total)} por dia útil** "
-                      f"({var_pct(ref['dia_util'], ant['dia_util']):+.1f}%) contra {rot_ant}. ")
+                      f"({num(var_pct(ref['dia_util'], ant['dia_util']), 1, True)}%) contra {rot_ant}. ")
             if cai_cartao < 0 and parcela >= 100:
                 st.error(cabeca + f"**A queda é toda do cartão** — ele caiu {brl(-cai_cartao)} "
                          f"por dia útil, mais que a queda total: PIX e boleto até subiram "
@@ -269,14 +288,22 @@ with t1:
             showa[rotulo(m)] = showa[rotulo(m)].map(brl)
         st.dataframe(showa, use_container_width=True, hide_index=True)
         st.caption("Troca de adquirente aparece aqui: um cai, o outro sobe. Se a soma dos dois "
-                   "não recompõe, a queda é de venda — não de migração.")
+                   "não recompõe, a queda é de venda — não de migração. A *Liberação "
+                   "Vinculada* é cartão antecipado liberado pelo Safra na Matriz: entra no "
+                   "total do cartão e também no total antecipado.")
 
     if ref["antecip"]:
-        st.warning(f"**Antecipação de recebíveis: {brl(ref['antecip'])} na janela.** "
-                   "Isso é venda futura puxada para hoje — infla o mês atual e esvazia o "
-                   f"próximo. Sem ela a receita da janela seria {brl(ref['receita'] - ref['antecip'])} "
-                   f"({brl((ref['receita'] - ref['antecip']) / DU[mes])} por dia útil). "
-                   "O custo do desconto vem embutido no líquido: não aparece como despesa.")
+        txt = (f"**Antecipação de recebíveis: {brl(ref['antecip'])} na janela — "
+               f"{pct(ref['antecip_pct'])} de tudo que entrou de venda.** ")
+        if ant and ref["antecip_pct"] > ant["antecip_pct"] + 1:
+            txt += (f"Era {pct(ant['antecip_pct'])} em {rot_ant}: a dependência está "
+                    f"**subindo {num(ref['antecip_pct'] - ant['antecip_pct'])} pontos**. ")
+        txt += ("Antecipar não cria receita, só muda a data: a venda continua a mesma, "
+                "recebida antes e com desconto. Quanto maior a fatia, mais o mês de hoje "
+                "está vivendo do recebimento do mês que vem — e o custo do desconto vem "
+                "embutido no valor líquido, então **não aparece como despesa em lugar "
+                "nenhum desta tela**. Para medir o custo, informe a taxa na aba 🎯.")
+        st.warning(txt)
 
     with st.expander("🔍 Ver detalhes do cálculo"):
         st.markdown(f"""
@@ -288,7 +315,9 @@ with t1:
   (plano 1 e 2). Não inclui aluguel, transferência entre empresas nem resgate de aplicação.
 - **Cartão:** entradas cujo histórico cita a adquirente ({', '.join(ADQUIRENTES)}).
   Está dentro da receita, não somado a ela.
-- **Antecipação:** entradas com "antecipação" no histórico — subconjunto do cartão.
+- **Antecipação:** entradas com "antecipação" no histórico **ou** "Liberação Vinculada"
+  (o Safra libera na Matriz o cartão antecipado sem citar a adquirente). É subconjunto
+  do cartão, não uma parcela somada à receita.
 - Contas fora do comparativo: {len(atrasadas)}.
 """)
 
@@ -685,7 +714,9 @@ with t5:
     corte_socios = c2.slider("Cortar dos sócios (%)", 0, 60, 20, 5,
                              help=f"Base: {brl(base_socios)}/mês (pró-labore + pessoais)")
     custo_antecip = c3.slider("Custo da antecipação (% a.m.)", 0.0, 4.0, 2.0, 0.1,
-                              help="Taxa cobrada pela adquirente para adiantar o recebível")
+                              help=f"Taxa cobrada para adiantar o recebível. Base: "
+                                   f"{brl(base_antecip)}/mês antecipados "
+                                   f"({pct(ref['antecip_pct'])} da receita)")
 
     ganho_compra = base_compra * corte_compra / 100
     ganho_socios = base_socios * corte_socios / 100
@@ -704,7 +735,7 @@ with t5:
 |---|---:|---:|---:|
 | Compra de mercadoria | {brl(base_compra)} | {corte_compra}% | **{brl(ganho_compra)}** |
 | Retirada dos sócios | {brl(base_socios)} | {corte_socios}% | **{brl(ganho_socios)}** |
-| Parar de antecipar recebível | {brl(base_antecip)} antecipados | {custo_antecip:.1f}% a.m. | **{brl(ganho_antecip)}** |
+| Parar de antecipar recebível | {brl(base_antecip)} antecipados | {num(custo_antecip)}% a.m. | **{brl(ganho_antecip)}** |
 """)
 
     contratos_cad = [c for c in query(
@@ -729,11 +760,11 @@ with t5:
                 "Banco": ct.get("banco") or "—",
                 "Taxa % a.m.": ct.get("taxa_am"),
                 "Saldo devedor": brl(saldo),
-                "Quitado no mês nº": "—" if not meses else f"{meses:.1f}".replace(".", ","),
+                "Quitado no mês nº": "—" if not meses else num(meses),
                 "Acumulado": brl(acumulado)})
         st.dataframe(pd.DataFrame(linhas), use_container_width=True, hide_index=True)
         total_divida = sum(float(c.get("saldo_devedor") or 0) for c in contratos_cad)
-        prazo_txt = f"{total_divida / sobra_nova:.1f}".replace(".", ",")
+        prazo_txt = num(total_divida / sobra_nova)
         st.info(f"**Dívida total cadastrada: {brl(total_divida)}.** Com a sobra de "
                 f"{brl(sobra_nova)}/mês, a saída completa leva **{prazo_txt} meses** — "
                 "sem considerar os juros que continuam correndo sobre o saldo, então trate "
@@ -748,7 +779,7 @@ with t5:
     with st.expander("🔍 Ver detalhes do cálculo"):
         st.markdown(f"""
 - As bases mensais vêm da janela ({dia_corte} dias corridos) multiplicadas por
-  {fator_mes:.2f} para virar mês cheio — ordem de grandeza, não fechamento.
+  {num(fator_mes, 2)} para virar mês cheio — ordem de grandeza, não fechamento.
 - **Sobra hoje** = geração operacional − sócios − parcelas, tudo projetado para o mês.
 - **Corte na compra** assume que a venda não cai junto: vale enquanto houver estoque para
   girar. Por isso o teto do controle é 40% e não 100%.

@@ -109,7 +109,19 @@ def main(path: str, commit: bool, sem_fallback: bool = False) -> None:
             "SELECT COALESCE(SUM(valor),0) v FROM lancamentos WHERE empresa_id=? AND data=? "
             "AND origem='extrato' AND UPPER(descricao) LIKE '%BOLETO DDA%'", (emp_id, dia))["v"]
         if ja:
-            status = "já detalhado"
+            # ⚠️ NAO basta dizer "ja detalhado": se o dia foi detalhado com um
+            # relatorio baixado ANTES de todos os boletos aparecerem, o lump do
+            # extrato foi trocado por menos boletos do que o banco pagou e a
+            # diferenca SUMIU da base. Foi assim que ficaram de fora R$ 253,68 na
+            # Filial e R$ 29.900,81 na Matriz, os dois em 17/08/2026. Entao
+            # confere a soma do relatorio contra o que esta gravado e grita.
+            grav = float(query_one(
+                "SELECT COALESCE(SUM(valor),0) v FROM lancamentos WHERE empresa_id=? "
+                "AND data=? AND origem='dda-detalhe'", (emp_id, dia))["v"])
+            falta = round(float(plan) - grav, 2)
+            status = ("já detalhado" if abs(falta) < 0.01 else
+                      f"⚠️ JÁ DETALHADO MAS FALTAM {falta:+,.2f} "
+                      f"(gravado {grav:,.2f}) — ver _completar_dda_faltantes.py")
         elif somado == 0:
             status = "sem linha no extrato"
         elif abs(somado - plan) < 0.01:

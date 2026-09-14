@@ -140,6 +140,13 @@ emp_por_apelido = {e["apelido"]: e["id"] for e in empresas}
 
 # ─── 1) Atualizar a lista de Contas a Pagar (subir a planilha) ────────────────
 with st.expander("📤 Atualizar Contas a Pagar (subir a planilha *A Pagar Geral*)"):
+    # Recado da última gravação, CONFERIDO NO BANCO. Em 25/08/2026 o Filipe subiu
+    # a planilha do dia e nenhum dos 47 títulos entrou (a Brisanet de R$ 329,99
+    # continuava fora do CPR na tela) — a mensagem de sucesso some no st.rerun()
+    # e não dava pra saber se tinha gravado. Agora fica escrito o que o BANCO
+    # respondeu depois do insert, não o que o insert prometeu.
+    if st.session_state.get("apagar_recado"):
+        st.info(st.session_state.pop("apagar_recado"))
     arq = st.file_uploader("Planilha A Pagar Geral (.xlsx)", type=["xlsx", "xls"],
                            key="upl_apagar")
     if arq:
@@ -180,15 +187,32 @@ with st.expander("📤 Atualizar Contas a Pagar (subir a planilha *A Pagar Geral
             novos.append((t, h))
         st.caption(f"{len(novos)} novo(s) · {len(titulos) - len(novos)} já estavam cadastrados.")
         if novos and st.button(f"✅ Cadastrar {len(novos)} título(s) novos", type="primary"):
-            executemany(
-                "INSERT INTO titulos (empresa_id, tipo, descricao, contraparte, valor, "
-                "vencimento, documento, tipo_docto, loja, origem, status, linha_hash) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                [(emp_por_apelido.get(t["empresa"]), "pagar",
-                  (t["historico"] or t["fornecedor"])[:200], t["fornecedor"], t["valor"],
-                  t["vencimento"], t["documento"], t["tipo_docto"], t["loja"],
-                  "argos", "aberto", h) for t, h in novos])
-            st.success(f"Cadastrados {len(novos)} títulos. Confira abaixo.")
+            try:
+                executemany(
+                    "INSERT INTO titulos (empresa_id, tipo, descricao, contraparte, valor, "
+                    "vencimento, documento, tipo_docto, loja, origem, status, linha_hash) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    [(emp_por_apelido.get(t["empresa"]), "pagar",
+                      (t["historico"] or t["fornecedor"])[:200], t["fornecedor"], t["valor"],
+                      t["vencimento"], t["documento"], t["tipo_docto"], t["loja"],
+                      "argos", "aberto", h) for t, h in novos])
+            except Exception as e:
+                st.error(f"⛔ **Não consegui gravar os títulos:** {e} — "
+                         "nada foi cadastrado. Tente de novo; se repetir, me chame.")
+                st.stop()
+            # confere no BANCO o que realmente entrou (o insert pode ter ido pro
+            # limbo sem erro visível se a sessão cair no meio)
+            hashes = [h for _, h in novos]
+            gravados = query_one(
+                "SELECT COUNT(*) n FROM titulos WHERE linha_hash IN "
+                f"({','.join(['?'] * len(hashes))})", tuple(hashes))["n"]
+            if gravados == len(novos):
+                st.session_state["apagar_recado"] = (
+                    f"✅ **{gravados} título(s) cadastrados** e conferidos no banco.")
+            else:
+                st.session_state["apagar_recado"] = (
+                    f"⚠️ **Pedi {len(novos)} e o banco confirmou {gravados}.** "
+                    "Suba a planilha de novo (o que já entrou não duplica).")
             st.rerun()
 
 # ─── 2) Período ───────────────────────────────────────────────────────────────

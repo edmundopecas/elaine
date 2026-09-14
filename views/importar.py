@@ -83,6 +83,23 @@ if arquivo:
         st.warning("Nenhum movimento encontrado no arquivo.")
         st.stop()
 
+    # ── Trava de SINAL TROCADO ───────────────────────────────────────────────
+    # Extrato em que NENHUM movimento é saída. Em 25/08/2026 o BB entregou os 4
+    # OFX do dia com TUDO <TRNTYPE>CREDIT</TRNTYPE> e valor positivo — inclusive
+    # "Pix - Enviado" e "Pagamento de Boleto". Como o dedup casa (data, valor,
+    # TIPO, documento), a saída já gravada não bate com a "entrada" gêmea e o mês
+    # inteiro entraria de novo com o sinal invertido, dobrando o movimento.
+    # Conta corrente movimentada sempre tem débito: a partir de 10 movimentos sem
+    # um único, o arquivo veio quebrado da origem — baixar de novo.
+    if len(movimentos) >= 10 and not any(m["tipo"] == "saida" for m in movimentos):
+        st.error(f"⛔ **Esse arquivo não tem NENHUMA saída** — são {len(movimentos)} "
+                 "movimentos, todos de entrada. Foi assim que o BB exportou os "
+                 "extratos de 25/08/2026: com o sinal trocado. Se importar, tudo "
+                 "que já está na base entra de novo como entrada e o mês dobra. "
+                 "**Baixe o extrato de novo no banco.**")
+        if not st.checkbox("Confirmo: essa conta só teve entradas mesmo, quero importar"):
+            st.stop()
+
     # ── Trava de CONTA TROCADA ───────────────────────────────────────────────
     # Compara o número da conta que vem DENTRO do arquivo com a conta escolhida.
     # Se não bater, bloqueia (a Elaine confirma explicitamente pra passar). Onde

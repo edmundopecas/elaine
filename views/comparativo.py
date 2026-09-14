@@ -16,6 +16,7 @@ import pandas as pd
 import streamlit as st
 
 from db import query
+from motor_caixa import ORDEM, SUBTOTAIS, ponte
 
 
 def brl(v: float) -> str:
@@ -72,16 +73,12 @@ tot_r = tot_e - tot_s
 
 st.caption(f"**Grupo Edmundo** · {d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}")
 
-# ── Tudo que saiu do caixa mas não é despesa da operação (retiradas dos sócios,
-#    consórcio, empréstimo, saque, valores a recuperar) — Filipe quer abater
-#    porque no fim o dinheiro saiu. Ficam de fora só transferências entre as
-#    contas (id 31), aporte de sócio (32) e aplicações (33: dinheiro ainda seu).─
-retiradas = query(
-    """SELECT COALESCE(SUM(CASE WHEN l.tipo='saida' THEN l.valor ELSE -l.valor END),0) v
-       FROM lancamentos l JOIN plano_contas p ON p.id=l.plano_conta_id
-       WHERE p.entra_dre=0 AND p.id NOT IN (31, 32, 33)
-         AND l.data BETWEEN ? AND ?""", par)[0]["v"]
-sobra_final = tot_r - retiradas
+# ── Ponte do motor único (motor_caixa.ponte) — o MESMO da 💊 Saúde Financeira ──
+PT = ponte(*par)
+# o que saiu do caixa e não é despesa: sócios, empréstimo, consórcio/saque/a recuperar
+retiradas = -(PT["socios"] + PT["emprestimos"] + PT["consorcio_outros"])
+sobra_final = PT["sobra"]     # mesma linha "= SOBRA / FALTA" da tabela abaixo
+assert abs(PT["resultado"] - tot_r) < 0.01, "motor e tela divergiram — investigar"
 
 # ── KPIs do grupo ─────────────────────────────────────────────────────────────
 k = st.columns(3)
@@ -100,7 +97,8 @@ s = st.columns(2)
 s[0].metric("💵 Sobrou de fato (caixa da operação)", brl(sobra_final),
             help="Resultado da operação menos tudo que saiu de caixa e não é despesa: "
                  "gastos pessoais dos sócios, consórcio, empréstimo, saque e valores "
-                 "a recuperar.")
+                 "a recuperar — mais pendentes e transferências sem o outro lado. "
+                 "É a linha '= SOBRA / FALTA' da tabela abaixo.")
 s[1].metric("➖ Saídas que não são despesa (sócios, consórcio, empréstimo, saque)",
             brl(retiradas), delta_color="off",
             help="Saiu do caixa, mas não é despesa da operação (dono tirando dinheiro, "
@@ -108,170 +106,35 @@ s[1].metric("➖ Saídas que não são despesa (sócios, consórcio, empréstimo
                  "transferências entre contas ficam de fora.")
 st.caption(f"Da operação sobraram **{brl_md(tot_r)}**; abatendo tudo que saiu de caixa e "
            f"não é despesa — sócios, consórcio, empréstimo, saque e valores a recuperar "
-           f"(**{brl_md(retiradas)}**) — o que de fato sobrou em caixa pela operação foi "
-           f"**{brl_md(sobra_final)}**. (Aplicações não entram: o dinheiro continua seu, "
-           f"só rendendo.)")
+           f"(**{brl_md(retiradas)}**), mais pendentes e transferências sem o outro lado "
+           f"(**{brl_md(PT['pend'] + PT['transf'])}**) — o que de fato sobrou em caixa pela "
+           f"operação foi **{brl_md(sobra_final)}**. (Aplicações não entram: o dinheiro "
+           f"continua seu, só rendendo.)")
 
-# ── 🔎 Ponte: do resultado da operação ao caixa que de fato ficou ─────────────
-_nd = query(
-    """SELECT p.nome, l.tipo, SUM(l.valor) v FROM lancamentos l
-       JOIN plano_contas p ON p.id=l.plano_conta_id
-       WHERE p.entra_dre=0 AND l.data BETWEEN ? AND ?
-       GROUP BY p.nome, l.tipo""", par)
-_pend = query(
-    """SELECT l.tipo, SUM(l.valor) v FROM lancamentos l
-       WHERE l.plano_conta_id IS NULL AND l.data BETWEEN ? AND ?
-       GROUP BY l.tipo""", par)
-
-
-def _bucket(nome: str) -> str:
-    if nome == "Aplicação/Resgate Financeiro":
-        return "Aplicações (dinheiro parado, ainda seu)"
-    if nome == "Transferência entre Empresas":
-        return "Transferências entre contas do grupo"
-    if nome.startswith("Pessoal - ") or nome == "Pró-labore":
-        return "Gastos particulares dos sócios"
-    return "Consórcio / empréstimos / saque / outros"
-
-
-bridge: dict[str, float] = {}
-for r in _nd:
-    bridge[_bucket(r["nome"])] = bridge.get(_bucket(r["nome"]), 0.0) + (
-        r["v"] if r["tipo"] == "entrada" else -r["v"])
-pend_net = sum((r["v"] if r["tipo"] == "entrada" else -r["v"]) for r in _pend)
-
-# ── DE QUEM É O SALDO QUE NÃO FECHA (04/08/2026) ─────────────────────────────
-# Pergunta do Filipe olhando a ponte: "essas transferências todas elas são da Robson?
-# porque não importamos nada da Robson, é por isso que estão em aberto". Estava certo
-# no principal — mas só olhando o número não dava pra saber. Agora a tela mostra de
-# quem é, com a conta aberta. MEDIDO em julho: Robson +150.000,00 · Macdiesel
-# −16.289,00 = os R$ 133.711,00 exatos que apareciam sem explicação.
-_tr_lanc = query(
-    """SELECT l.data, l.tipo, l.valor, l.contraparte, l.descricao, l.cnpj_contraparte
-       FROM lancamentos l JOIN plano_contas p ON p.id=l.plano_conta_id
-       WHERE p.nome='Transferência entre Empresas' AND l.data BETWEEN ? AND ?
-       ORDER BY l.data, l.valor DESC""", par)
-
-# Quem é a contraparte, em três tentativas (da mais confiável pra menos):
-#  1) CNPJ (o OFX do Safra traz no 2º MEMO) — pela RAIZ, então matriz e filial, que
-#     têm a mesma raiz 06012511, caem juntas sozinhas;
-#  2) apelido no texto: o extrato escreve o mesmo grupo de N jeitos ("ROBSON PIME",
-#     "Robson Pimentel Da Silva Ltda"). **Braga entra junto do Edmundo** por medição,
-#     não por palpite: em julho as 17 saídas «Pix Enviado BRAGA AUTO PECAS»
-#     (R$ 767.821,16) têm TODAS a entrada gêmea — mesmo valor, mesmo dia — numa conta
-#     do Edmundo; sobra R$ 0,00. Filipe: "esse valor que você considerou com o nome
-#     Braga é a Edmundo Matriz". Sem unir, a tela mostrava duas linhas gigantes que se
-#     anulam e escondia o que de fato não fecha;
-#  3) texto genérico do Safra ("PIX ENVIADO/RECEBIDO TRANSF", sem nome e sem CNPJ):
-#     vira UM balde só. São os dois lados da mesma transferência — em junho, 10 saídas
-#     e 10 entradas de R$ 411.770,56 cada — e no balde único eles se anulam, em vez de
-#     aparecerem como duas linhas gigantes "sem explicação".
-_APELIDOS = (("robson", "Robson"), ("macdiesel", "Macdiesel"), ("turali", "Turali"),
-             ("supernova", "Supernova"), ("rosilene", "Rosilene"),
-             ("eb particip", "EB Participações"), ("ferro velho", "Ferro Velho"),
-             ("braga", "Edmundo (matriz/filial)"),
-             ("edmundo", "Edmundo (matriz/filial)"), ("e pecas", "Edmundo (matriz/filial)"),
-             ("e p serv", "Edmundo (matriz/filial)"), ("e p ser", "Edmundo (matriz/filial)"),
-             ("06012511", "Edmundo (matriz/filial)"))
-_GENERICOS = ("pix enviado transf", "pix recebido transf", "pix enviado", "pix recebido",
-              "transferencia enviada", "transferencia recebida")
-SEM_NOME = "Sem nome no extrato (os dois lados)"
-
-# raiz do CNPJ -> apelido da empresa cadastrada (raiz repetida = matriz+filial)
-_por_raiz: dict[str, set] = {}
-for _e in query("SELECT apelido, cnpj FROM empresas WHERE cnpj IS NOT NULL AND cnpj<>''"):
-    _por_raiz.setdefault("".join(c for c in _e["cnpj"] if c.isdigit())[:8],
-                         set()).add(_e["apelido"])
-_RAIZ_NOME = {r: ("Edmundo (matriz/filial)" if len(n) > 1 else next(iter(n)))
-              for r, n in _por_raiz.items()}
-
-
-def _sem_acento(txt: str) -> str:
-    return unicodedata.normalize("NFKD", txt or "").encode("ASCII", "ignore").decode().lower()
-
-
-def _apelido(txt: str, cnpj: str | None) -> str:
-    raiz = "".join(c for c in (cnpj or "") if c.isdigit())[:8]
-    if raiz in _RAIZ_NOME:
-        return _RAIZ_NOME[raiz]
-    t = _sem_acento(txt).strip()
-    for chave, nome in _APELIDOS:
-        if chave in t:
-            return nome
-    limpo = " ".join(t.replace("-", " ").split())
-    if any(limpo.startswith(g) and len(limpo) <= len(g) + 4 for g in _GENERICOS):
-        return SEM_NOME
-    return (txt or "?").strip()[:34] or "?"
-
-
-# PAREAR POR VALOR+DATA, NÃO POR NOME. Em junho o OFX do Safra manda metade dos PIX
-# só como "PIX ENVIADO TRANSF" (sem nome, sem CNPJ), então agrupar por nome mostrava
-# "Edmundo −674.721,10" contra um balde "sem nome +471.359,00" — dois números que se
-# anulam e não explicam nada. Pareado é o que TEM o outro lado: mesma quantia saindo
-# de uma conta e entrando noutra no mesmo dia (ou no dia seguinte, quando o crédito
-# cai depois). O que sobra é o que de fato falta importar.
-_ent = [dict(r) for r in _tr_lanc if r["tipo"] == "entrada"]
-_sai = [dict(r) for r in _tr_lanc if r["tipo"] == "saida"]
-_por_valor: dict[int, list[dict]] = {}
-for _e in _ent:
-    _por_valor.setdefault(int(round(_e["valor"] * 100)), []).append(_e)
-for _s in _sai:
-    for _cand in _por_valor.get(int(round(_s["valor"] * 100)), []):
-        if _cand.get("_usada"):
-            continue
-        _dias = (pd.Timestamp(str(_cand["data"])[:10]) - pd.Timestamp(str(_s["data"])[:10])).days
-        if 0 <= _dias <= 1:
-            _cand["_usada"] = _s["_usada"] = True
-            break
-
-_por_apelido: dict[str, list[float]] = {}
-for r in _ent + _sai:
-    if r.get("_usada"):
-        continue                       # achou o outro lado: não é problema nenhum
-    a = _por_apelido.setdefault(
-        _apelido(f"{r['contraparte'] or ''} {r['descricao'] or ''}",
-                 r["cnpj_contraparte"]), [0.0, 0.0])
-    a[0 if r["tipo"] == "entrada" else 1] += r["valor"]
-_nao_fecha = sorted(((n, e - s, e, s) for n, (e, s) in _por_apelido.items()
-                     if abs(e - s) > 0.01), key=lambda x: -abs(x[1]))
-# A transferência entre as PRÓPRIAS contas do grupo deveria zerar (sai de uma,
-# entra na outra). O saldo que sobra é só distorção de imports incompletos —
-# tiramos do corpo da ponte e mostramos como ajuste à parte, pra não enganar.
-transf = bridge.pop("Transferências entre contas do grupo", 0.0)
-caixa_operacao = tot_r + sum(bridge.values()) + pend_net   # caixa que deveria ter ficado
-caixa_calc = caixa_operacao + transf                       # caixa observado hoje
-
-with st.expander("🔎 Ver detalhes: por que o resultado não é o que ficou na conta"):
-    st.caption("Tudo aqui vem de extrato — cada lançamento já é dinheiro movimentado "
-               "(não existe 'a receber' nem 'a pagar'). O resultado da operação gera "
-               "caixa, mas parte dele sai para coisas que **não são despesa**:")
-    linhas = [("Resultado da operação (receita − despesa)", tot_r)]
-    for nome in ["Aplicações (dinheiro parado, ainda seu)",
-                 "Gastos particulares dos sócios",
-                 "Consórcio / empréstimos / saque / outros"]:
-        if nome in bridge:
-            linhas.append((nome, bridge[nome]))
-    if pend_net:
-        linhas.append(("Saídas ainda sem categoria (pendentes)", pend_net))
-    linhas.append(("= Caixa que deveria ter ficado (pela operação)", caixa_operacao))
-    if transf:
-        linhas.append(("(+) Transferências sem o outro lado (conta não importada)",
-                       transf))
-    linhas.append(("= Caixa observado hoje nas contas", caixa_calc))
-    # dinheiro como TEXTO alinhado à direita: o NumberColumn(format="R$ %.2f") escreve
-    # "R$ 134220.90" (ponto decimal, sem milhar) e o "localized" come os centavos.
+# ── 🔎 Ponte completa: entrou → saiu → o que ficou no caixa ─────────────────
+transf, _nao_fecha = PT["transf"], PT["nao_fecha"]
+with st.expander("🔎 Ver tudo: o que entrou, o que saiu e por que o caixa não é o resultado",
+                 expanded=True):
+    st.caption("Tudo aqui vem de extrato — cada lançamento já é dinheiro movimentado. "
+               "Fica de fora só o que é dinheiro trocando de bolso: aplicação/resgate que "
+               "o próprio banco faz e transferência entre contas do grupo **que achou o "
+               "outro lado**. Mesma tabela da 💊 Saúde Financeira.")
+    linhas = [(nome, PT[k]) for nome, k in ORDEM
+              if k in SUBTOTAIS or abs(PT[k]) >= 0.005]
+    linhas.append(("(+) Aplicação líquida no período (dinheiro parado, ainda seu)",
+                   PT["aplic_liq"]))
+    if abs(PT["aporte"]) >= 0.005:
+        linhas.append(("(+) Aporte / empréstimo de sócio", PT["aporte"]))
+    linhas.append(("= Caixa que de fato ficou nas contas", PT["caixa_calc"]))
+    df_p = pd.DataFrame([{" ": n, "R$": brl(v)} for n, v in linhas])
+    negrito = df_p[" "].str.startswith("=")
     st.dataframe(
-        pd.DataFrame([{" ": n, "R$": brl(v)} for n, v in linhas]),
+        df_p.style.apply(lambda col: ["font-weight: bold" if b else "" for b in negrito]),
         hide_index=True, use_container_width=True,
         column_config={"R$": st.column_config.TextColumn(width="small",
                                                          alignment="right")})
-    st.caption("⚠️ Transferência entre as suas próprias contas **não é dinheiro novo** "
-               "— deveria zerar (sai de uma conta, entra na outra). Esse saldo de "
-               f"**{brl(transf)}** é o que **falta o outro lado**: a conta que mandou "
-               "(ou recebeu) o dinheiro não está importada. Veja de quem é logo abaixo.")
-
-    if transf and _nao_fecha:
-        st.markdown("**De quem é esse saldo** — só quem não tem o outro lado no período:")
+    if abs(transf) > 0.01 and _nao_fecha:
+        st.markdown("**Transferências sem o outro lado — de quem é:**")
         st.dataframe(
             pd.DataFrame([{"Quem": n, "Entrou": brl(e), "Saiu": brl(s),
                            "Falta o outro lado": brl(liq)}
@@ -281,16 +144,12 @@ with st.expander("🔎 Ver detalhes: por que o resultado não é o que ficou na 
                            **{c: st.column_config.TextColumn(width="small",
                                                              alignment="right")
                               for c in ("Entrou", "Saiu", "Falta o outro lado")}})
-        st.caption("As linhas acima somam exatamente o saldo. **Positivo** = o dinheiro "
-                   "chegou e não vimos sair (a conta de quem mandou não é importada). "
-                   "**Negativo** = saiu daqui e não vimos chegar. Quem é conta de "
-                   "**fora do grupo** (Robson, por exemplo) nunca vai zerar sozinho: "
-                   "o extrato deles não é importado. · **Como é contado:** só aparece "
-                   "aqui o lançamento que **não achou o outro lado** — mesma quantia "
+        st.caption("**Positivo** = o dinheiro chegou e não vimos sair (a conta de quem "
+                   "mandou não é importada). **Negativo** = saiu daqui e não vimos chegar. "
+                   "Conta de **fora do grupo** (Robson, por exemplo) nunca fecha sozinha. "
+                   "Só aparece o lançamento que **não achou o outro lado** — mesma quantia "
                    "saindo de uma conta e entrando noutra no mesmo dia (ou no seguinte) "
-                   "sai da conta, mesmo quando o extrato não escreve o nome. Matriz, "
-                   "Filial e Braga contam como a mesma casa: em julho as 17 saídas "
-                   "«BRAGA AUTO PECAS» têm todas a entrada gêmea numa conta do Edmundo.")
+                   "fecha e some, mesmo sem nome no extrato.")
 
 st.divider()
 

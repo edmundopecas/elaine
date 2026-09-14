@@ -27,6 +27,7 @@ import streamlit as st
 
 from conferencia import casar, sugerir
 from db import query, execute
+from motor_caixa import ORDEM, SUBTOTAIS, ponte
 from tema import POSITIVO as VERDE, NEGATIVO as VERMELHO, ATENCAO as AZUL, NEUTRO as CINZA
 
 st.title("💊 Saúde Financeira")
@@ -151,17 +152,7 @@ def soma(m: str, extra_sql: str, extra_par: list | None = None) -> float:
 
 
 ASPA = "'"
-F_RECEITA = " AND l.tipo='entrada' AND p.id IN (1,2)"
-F_ALUGUEL = " AND l.tipo='entrada' AND p.id=67"
-F_CUSTOS = " AND l.tipo='saida' AND p.grupo='Custos'"
-F_PESSOAL = " AND l.tipo='saida' AND p.grupo='Despesas com Pessoal'"
-F_ESTRUTURA = (" AND l.tipo='saida' AND p.grupo IN "
-               "('Despesas Administrativas','Ocupação','Despesas Comerciais','Construção')")
-F_TRIBUTOS = " AND l.tipo='saida' AND p.grupo IN ('Tributos','Deduções')"
-F_FIN = " AND l.tipo='saida' AND l.plano_conta_id IN (26,27,28,35)"
-F_SOCIOS = " AND l.tipo='saida' AND p.grupo IN ('Sócios','Gastos Pessoais (Sócios)')"
-F_DIVIDA = " AND l.tipo='saida' AND l.plano_conta_id=39"
-
+# (os filtros por bloco moraram aqui até 14/09/2026; hoje vêm de motor_caixa.ponte)
 # Adquirentes: o recebimento de cartão não tem plano de contas próprio (cai como
 # Receita de Vendas), então é reconhecido pelo nome da bandeira no histórico.
 # "Liberação Vinculada" é o Safra liberando cartão ANTECIPADO (confirmado pelo
@@ -179,18 +170,30 @@ F_ANTECIP = (" AND l.tipo='entrada' AND (LOWER(l.descricao) LIKE '%antecipacao%'
              " OR LOWER(l.descricao) LIKE '%antecipação%'"
              " OR LOWER(l.descricao) LIKE '%liberacao vinculada%')")
 
-D = {m: {"receita": soma(m, F_RECEITA), "aluguel": soma(m, F_ALUGUEL),
-         "custos": soma(m, F_CUSTOS), "pessoal": soma(m, F_PESSOAL),
-         "estrutura": soma(m, F_ESTRUTURA), "tributos": soma(m, F_TRIBUTOS),
-         "financeiras": soma(m, F_FIN), "socios": soma(m, F_SOCIOS),
-         "divida": soma(m, F_DIVIDA), "cartao": soma(m, F_CARTAO),
-         "antecip": soma(m, F_ANTECIP)} for m in MESES}
+# Os números da ponte vêm do motor único (motor_caixa.ponte) — o MESMO que o
+# ⚖️ Comparativo usa. Alinhado em 14/09/2026 a pedido do Filipe: antes esta tela
+# deixava de fora rendimento de aplicação, receita eventual e consórcio, e as duas
+# telas davam resultado diferente para a mesma janela.
+def _janela(m: str) -> tuple[str, str]:
+    return f"{m}-01", f"{m}-{dia_corte:02d}"
+
+
+D = {}
+for m in MESES:
+    pt = ponte(*_janela(m), emp_id=emp_par[0] if emp_par else None)
+    D[m] = {"ponte": pt,
+            "receita": pt["receita_vendas"], "aluguel": pt["aluguel"],
+            "outras_rec": pt["outras_rec"],
+            "custos": -pt["custos"], "pessoal": -pt["pessoal"],
+            "estrutura": -pt["estrutura"], "tributos": -pt["tributos"],
+            "financeiras": -pt["financeiras"], "outras_desp": -pt["outras_desp"],
+            "socios": -pt["socios"], "divida": -pt["emprestimos"],
+            "consorcio_outros": -pt["consorcio_outros"],
+            "geracao": pt["resultado"], "apos_socios": pt["apos_socios"],
+            "sobra": pt["sobra"],
+            "cartao": soma(m, F_CARTAO), "antecip": soma(m, F_ANTECIP)}
 for m in MESES:
     d = D[m]
-    d["geracao"] = (d["receita"] + d["aluguel"] - d["custos"] - d["pessoal"]
-                    - d["estrutura"] - d["tributos"] - d["financeiras"])
-    d["apos_socios"] = d["geracao"] - d["socios"]
-    d["sobra"] = d["apos_socios"] - d["divida"]
     d["dia_util"] = d["receita"] / DU[m]
     d["cartao_du"] = d["cartao"] / DU[m]
     d["custo_pct"] = (d["custos"] / d["receita"] * 100) if d["receita"] else 0
@@ -585,23 +588,24 @@ with t2:
 # ═════════════════════════════════════════════════════════════════════════════
 with t3:
     st.subheader("Da venda até o que sobra para pagar banco")
-    ordem = [("Receita de vendas", "receita", 1), ("Receita de aluguel", "aluguel", 1),
-             ("(−) Compras", "custos", -1), ("(−) Pessoal", "pessoal", -1),
-             ("(−) Estrutura (admin, ocupação, comercial)", "estrutura", -1),
-             ("(−) Tributos e deduções", "tributos", -1),
-             ("(−) Tarifas, juros e IOF", "financeiras", -1)]
-    linhas = [{"Linha": nome, **{rotulo(m): D[m][k] * s for m in MESES}} for nome, k, s in ordem]
-    linhas.append({"Linha": "= GERAÇÃO OPERACIONAL", **{rotulo(m): D[m]["geracao"] for m in MESES}})
-    linhas.append({"Linha": "(−) Sócios (pró-labore + pessoais)",
-                   **{rotulo(m): -D[m]["socios"] for m in MESES}})
-    linhas.append({"Linha": "= DEPOIS DOS SÓCIOS", **{rotulo(m): D[m]["apos_socios"] for m in MESES}})
-    linhas.append({"Linha": "(−) Parcelas de empréstimo", **{rotulo(m): -D[m]["divida"] for m in MESES}})
-    linhas.append({"Linha": "= SOBRA / FALTA", **{rotulo(m): D[m]["sobra"] for m in MESES}})
+    st.caption("Tudo que entrou e tudo que saiu na janela justa — o mesmo número do "
+               "⚖️ Comparativo. Só fica de fora o que é dinheiro trocando de bolso: "
+               "aplicação/resgate que o próprio banco faz e transferência entre contas "
+               "do grupo **que achou o outro lado**.")
+    linhas = []
+    for nome, k in ORDEM:
+        vals = {rotulo(m): D[m]["ponte"][k] for m in MESES}
+        if k not in SUBTOTAIS and all(abs(v) < 0.005 for v in vals.values()):
+            continue                     # linha zerada em todos os meses não polui
+        linhas.append({"Linha": nome, **vals})
     df = pd.DataFrame(linhas)
     show = df.copy()
     for m in MESES:
         show[rotulo(m)] = show[rotulo(m)].map(brl)
-    st.dataframe(show, use_container_width=True, hide_index=True)
+    negrito = show["Linha"].str.startswith("=")
+    st.dataframe(
+        show.style.apply(lambda col: ["font-weight: bold" if b else "" for b in negrito]),
+        use_container_width=True, hide_index=True)
 
     if ref["sobra"] < 0:
         st.error(f"**Nesta janela a operação não pagou a própria dívida: faltaram "
@@ -611,18 +615,37 @@ with t3:
         st.success(f"**Sobraram {brl(ref['sobra'])} na janela** depois de pagar tudo, inclusive "
                    "sócios e parcela de banco.")
 
-    st.caption("Movimentação interna (transferência entre empresas, aplicação/resgate, "
-               "suprimento de caixa) fica de fora: não é ganho nem gasto, só dinheiro "
-               "trocando de bolso.")
+    pt_ref = ref["ponte"]
+    if abs(pt_ref["transf"]) > 0.01 and pt_ref["nao_fecha"]:
+        st.markdown(f"**Transferências sem o outro lado em {rotulo(mes)}** — de quem é:")
+        st.dataframe(
+            pd.DataFrame([{"Quem": n, "Entrou": brl(e), "Saiu": brl(s_),
+                           "Falta o outro lado": brl(liq)}
+                          for n, liq, e, s_ in pt_ref["nao_fecha"]]),
+            hide_index=True, use_container_width=True)
+        st.caption("**Positivo** = chegou e não vimos sair (a conta de quem mandou não é "
+                   "importada). **Negativo** = saiu daqui e não vimos chegar. Conta de fora "
+                   "do grupo (Robson, por exemplo) nunca fecha sozinha.")
 
     with st.expander("🔍 Ver detalhes do cálculo"):
-        st.markdown("""
-- Cada linha é a soma das saídas do **grupo** correspondente do plano de contas, na
-  janela justa. Nada de bucket "outros": o que não tem categoria aparece em Pendências.
-- **Sócios** junta pró-labore (grupo *Sócios*) e *Gastos Pessoais (Sócios)* — os dois
-  saem do caixa da empresa, independentemente de entrarem na DRE.
-- **Parcelas de empréstimo** = plano *Empréstimos/Financiamentos*. Só o que JÁ debitou
-  dentro da janela; o que ainda vai debitar no mês está na aba 🏦 Dívida.
+        st.markdown(f"""
+- **Entrou / saiu** = toda entrada e toda saída cuja categoria entra no resultado
+  (venda, serviço, aluguel, rendimento, eventual × compras, pessoal, estrutura, tributos,
+  tarifas). Os baldes são só a abertura: o **Resultado da operação** é exatamente
+  entrou − saiu, o mesmo do ⚖️ Comparativo.
+- **Sócios** junta pró-labore e *Gastos Pessoais (Sócios)* — os dois saem do caixa da
+  empresa, independentemente de entrarem na DRE.
+- **Parcelas de empréstimo** = plano *Empréstimos/Financiamentos*, só o que JÁ debitou
+  na janela. **Consórcio / saque / valores a recuperar** = o resto que saiu do caixa sem
+  ser despesa.
+- **Pendentes** entram numa linha própria (positivo se entrada, negativo se saída) —
+  classificar muda o balde, não o total.
+- **Transferências sem o outro lado**: sai de uma conta do grupo e não entra em
+  nenhuma (ou o contrário). Mesma quantia no mesmo dia ou no seguinte = fechou e some.
+- **Aplicação/resgate** (varredura automática do banco) e aporte de sócio não aparecem:
+  o dinheiro continua seu. Na janela de {rotulo(mes)} a aplicação líquida foi
+  **{brl(pt_ref['aplic_liq'])}** — somada à sobra, dá o caixa que de fato ficou nas
+  contas: **{brl(pt_ref['caixa_calc'])}**.
 - **Sobra/falta** é caixa, não lucro: compra de estoque pesa aqui no dia do pagamento.
 """)
 

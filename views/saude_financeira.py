@@ -89,11 +89,19 @@ if not meses_base:
     st.warning("Ainda não há lançamentos importados.")
     st.stop()
 
-c1, c2 = st.columns([1, 2])
+c1, c2, c3 = st.columns([1, 2, 1.3])
 mes = c1.selectbox("Mês de referência", meses_base, format_func=rotulo)
 empresas = query("SELECT id, apelido FROM empresas ORDER BY apelido")
 op_emp = ["Grupo todo (consolidado)"] + [e["apelido"] for e in empresas]
 sel_emp = c2.selectbox("Empresa", op_emp)
+# Janela fixa (pedido do Filipe em 16/09/2026): ver o resultado dos mesmos 15 dias
+# de cada mês, em vez do corte automático que anda conforme as importações.
+JANELAS = {"Automática (até onde todas as contas chegaram)": None,
+           "1ª quinzena (01 a 15)": 15,
+           "Mês inteiro (01 a 31)": 31}
+sel_jan = c3.selectbox("Janela", list(JANELAS), help="Automática = até o último dia em que "
+                       "TODAS as contas já foram importadas. Fixa = mesmos dias em todo mês.")
+dia_fixo = JANELAS[sel_jan]
 
 emp_sql, emp_par = "", []
 if sel_emp != op_emp[0]:
@@ -112,7 +120,10 @@ todas_ativas = query(
        FROM contas_bancarias cb JOIN empresas e ON e.id=cb.empresa_id
        WHERE cb.ativa=1 ORDER BY cb.id""")
 
-dia_corte = min((int(r["ult"][8:10]) for r in cob), default=1)
+dia_corte_auto = min((int(r["ult"][8:10]) for r in cob), default=1)
+dia_corte = dia_fixo or dia_corte_auto
+motivo_janela = ("janela fixa escolhida no filtro" if dia_fixo
+                 else "o corte é a conta que exporta mais devagar neste mês")
 com_mov = {r["c"] for r in cob}
 atrasadas = [r for r in todas_ativas if r["id"] not in com_mov]
 
@@ -123,11 +134,21 @@ conta_travou = min(cob, key=lambda r: r["ult"]) if cob else None
 if conta_travou:
     dono = next((t for t in todas_ativas if t["id"] == conta_travou["c"]), None)
     nome_travou = f"{dono['apelido']} / {dono['banco']}" if dono else "—"
-    st.info(f"**Janela comparável: 01 a {dia_corte:02d}/{mes[5:7]}** "
-            f"({DU[mes]} dias úteis). É até onde *todas* as contas que exportam já foram "
-            f"importadas — a mais atrasada é **{nome_travou}**, até "
-            f"{conta_travou['ult'][8:10]}/{mes[5:7]}. Os meses anteriores são comparados "
-            f"exatamente no mesmo intervalo de dias.")
+    if dia_fixo is None:
+        st.info(f"**Janela comparável: 01 a {dia_corte:02d}/{mes[5:7]}** "
+                f"({DU[mes]} dias úteis). É até onde *todas* as contas que exportam já foram "
+                f"importadas — a mais atrasada é **{nome_travou}**, até "
+                f"{conta_travou['ult'][8:10]}/{mes[5:7]}. Os meses anteriores são comparados "
+                f"exatamente no mesmo intervalo de dias.")
+    else:
+        fim = "15" if dia_fixo == 15 else "fim"
+        st.info(f"**Janela fixa: 01 a {fim} de cada mês** ({DU[mes]} dias úteis em "
+                f"{rotulo(mes)}). Os meses anteriores são comparados no mesmo intervalo.")
+        if dia_corte_auto < dia_fixo:
+            st.warning(f"⚠️ Em {rotulo(mes)} a janela ainda **não está completa**: a conta mais "
+                       f"atrasada é **{nome_travou}**, importada só até "
+                       f"{conta_travou['ult'][8:10]}/{mes[5:7]}. Os números deste mês vão "
+                       f"crescer quando o resto entrar — os meses anteriores já estão fechados.")
 else:
     st.warning("Sem movimento importado no mês selecionado.")
     st.stop()
@@ -311,8 +332,7 @@ with t1:
 
     with st.expander("🔍 Ver detalhes do cálculo"):
         st.markdown(f"""
-- **Janela:** dia 01 a {dia_corte:02d} de cada mês — o corte é a conta que exporta mais devagar
-  neste mês ({nome_travou}). Nenhum mês entra com mais dias que o outro.
+- **Janela:** dia 01 a {dia_corte:02d} de cada mês — {motivo_janela}. Nenhum mês entra com mais dias que o outro.
 - **Dias úteis:** segunda a sexta (feriado não é descontado — se o mês tem feriado,
   a média sai levemente para baixo nos dois meses comparados).
 - **Receita:** entradas classificadas como *Receita de Vendas* ou *Receita de Serviços*

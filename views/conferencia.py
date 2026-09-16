@@ -188,10 +188,14 @@ with st.expander("📤 Atualizar Contas a Pagar (subir a planilha *A Pagar Geral
         st.caption(f"{len(novos)} novo(s) · {len(titulos) - len(novos)} já estavam cadastrados.")
         if novos and st.button(f"✅ Cadastrar {len(novos)} título(s) novos", type="primary"):
             try:
+                # ON CONFLICT DO NOTHING: se um clique duplo/rerun já gravou parte do
+                # lote, o resto entra e o que já estava é ignorado — a conferência no
+                # banco logo abaixo diz quantos realmente estão lá.
                 executemany(
                     "INSERT INTO titulos (empresa_id, tipo, descricao, contraparte, valor, "
                     "vencimento, documento, tipo_docto, loja, origem, status, linha_hash) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT (linha_hash) WHERE linha_hash IS NOT NULL DO NOTHING",
                     [(emp_por_apelido.get(t["empresa"]), "pagar",
                       (t["historico"] or t["fornecedor"])[:200], t["fornecedor"], t["valor"],
                       t["vencimento"], t["documento"], t["tipo_docto"], t["loja"],

@@ -54,6 +54,16 @@ if IS_PG:
     _conn = None
     _SCHEMA_APLICADO = False   # o DDL do schema só roda 1x por processo
 
+    # TRAVA (16/09/2026): a conexão é UMA por processo e o Streamlit roda cada
+    # sessão/rerun numa thread própria — todas compartilhavam a MESMA transação.
+    # Um executemany longo (144 títulos, ~1 min do Cloud até sa-east-1) era
+    # atravessado por outro rerun: o `init_db()` da outra tela dava rollback no meio
+    # do lote, ou um `query()` dela commitava metade. Resultado visto: UniqueViolation
+    # em título que nem estava no banco. Com o lock, cada chamada (query/execute/
+    # executemany/init_db) roda inteira antes da próxima thread tocar na conexão.
+    import threading
+    _LOCK = threading.RLock()
+
     def _pg():
         """Conexão única, reaberta se cair.
 
@@ -110,19 +120,22 @@ if IS_PG:
         _conn = None                     # força _pg() a abrir uma nova
 
     def _rodar(fn):
-        """Executa fn(conn); em erro de conexão morta, reabre e tenta 1x mais."""
+        """Executa fn(conn); em erro de conexão morta, reabre e tenta 1x mais.
+
+        Serializado pelo _LOCK: nenhuma outra thread usa a conexão enquanto fn roda."""
         ultimo = None
-        for tentativa in (1, 2):
-            conn = _pg()
-            try:
-                return fn(conn)
-            except Exception as e:
-                _rollback_seguro(conn)
-                if tentativa == 1 and isinstance(e, _CONN_MORTA):
-                    _descartar_conn(conn)
-                    ultimo = e
-                    continue
-                raise
+        with _LOCK:
+            for tentativa in (1, 2):
+                conn = _pg()
+                try:
+                    return fn(conn)
+                except Exception as e:
+                    _rollback_seguro(conn)
+                    if tentativa == 1 and isinstance(e, _CONN_MORTA):
+                        _descartar_conn(conn)
+                        ultimo = e
+                        continue
+                    raise
         raise ultimo                     # inalcançável, mas explícito
 
     def query(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
@@ -173,19 +186,20 @@ if IS_PG:
         qualquer transação travada (auto-cura), e (2) o DDL roda em autocommit —
         cada instrução confirma sozinha, então uma falha não prende a conexão."""
         global _SCHEMA_APLICADO
-        conn = _pg()
-        conn.rollback()                      # limpa transação pendente/quebrada
-        if not _SCHEMA_APLICADO:             # DDL só 1x por processo (não a cada rerun)
-            schema = SCHEMA_PG_PATH.read_text(encoding="utf-8")
-            prev_ac = conn.autocommit
-            conn.autocommit = True           # DDL não fica preso numa transação
-            try:
-                with conn.cursor() as cur:
-                    cur.execute("SET search_path TO elaine, public")
-                    cur.execute(schema)
-            finally:
-                conn.autocommit = prev_ac
-            _SCHEMA_APLICADO = True
+        with _LOCK:                          # nunca dar rollback no meio do lote de outra thread
+            conn = _pg()
+            conn.rollback()                  # limpa transação pendente/quebrada
+            if not _SCHEMA_APLICADO:         # DDL só 1x por processo (não a cada rerun)
+                schema = SCHEMA_PG_PATH.read_text(encoding="utf-8")
+                prev_ac = conn.autocommit
+                conn.autocommit = True       # DDL não fica preso numa transação
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SET search_path TO elaine, public")
+                        cur.execute(schema)
+                finally:
+                    conn.autocommit = prev_ac
+                _SCHEMA_APLICADO = True
         if not query("SELECT 1 FROM plano_contas LIMIT 1"):
             from seed import rodar_seed
             rodar_seed()

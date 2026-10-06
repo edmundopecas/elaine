@@ -26,6 +26,7 @@ import pandas as pd
 import streamlit as st
 
 from conferencia import casar, sugerir
+from cobertura import conferido_ate, marcar as marcar_cobertura
 from db import query, execute
 from motor_caixa import ORDEM, SUBTOTAIS, ponte
 from tema import POSITIVO as VERDE, NEGATIVO as VERMELHO, ATENCAO as AZUL, NEUTRO as CINZA
@@ -120,6 +121,11 @@ todas_ativas = query(
        FROM contas_bancarias cb JOIN empresas e ON e.id=cb.empresa_id
        WHERE cb.ativa=1 ORDER BY cb.id""")
 
+# Conta sem movimento no fim do mês não "parou": se foi marcada como conferida até
+# um dia, vale o maior entre essa marca e o último lançamento (ver cobertura.py).
+_conf = conferido_ate(mes)
+cob = [dict(r, ult=max(r["ult"], _conf.get(r["c"], ""))) for r in cob]
+
 dia_corte_auto = min((int(r["ult"][8:10]) for r in cob), default=1)
 dia_corte = dia_fixo or dia_corte_auto
 motivo_janela = ("janela fixa escolhida no filtro" if dia_fixo
@@ -152,6 +158,27 @@ if conta_travou:
 else:
     st.warning("Sem movimento importado no mês selecionado.")
     st.stop()
+
+# Conta que não mexeu nos últimos dias do mês: o Filipe confirma e a janela anda.
+_a, _m = int(mes[:4]), int(mes[5:7])
+_fim_mes = (date(_a + _m // 12, _m % 12 + 1, 1) - timedelta(days=1))
+_limite = min(_fim_mes, date.today() - timedelta(days=1)).isoformat()
+_curtas = [r for r in cob if r["ult"] < _limite]
+if _curtas:
+    _nome = {t["id"]: f"{t['apelido']} / {t['descricao']}" for t in todas_ativas}
+    with st.expander(f"Conta sem movimento no fim do mês? ({len(_curtas)} parada(s) antes de "
+                     f"{_limite[8:10]}/{_limite[5:7]})"):
+        st.caption("Se o extrato dessas contas realmente não teve lançamento depois do último dia "
+                   "importado, marque aqui — a janela automática passa a considerá-las completas.")
+        _sel = st.multiselect("Contas completas até " + f"{_limite[8:10]}/{_limite[5:7]}",
+                              [r["c"] for r in _curtas],
+                              format_func=lambda c: f"{_nome.get(c, c)} (último lançamento "
+                              f"{next(r['ult'] for r in _curtas if r['c'] == c)[8:10]}/{mes[5:7]})")
+        if st.button("Marcar como completas", disabled=not _sel):
+            for c in _sel:
+                marcar_cobertura(c, mes, _limite)
+            st.cache_data.clear()
+            st.rerun()
 
 if atrasadas:
     txt = " · ".join(
